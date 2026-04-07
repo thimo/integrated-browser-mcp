@@ -105,11 +105,38 @@ The server binds to `127.0.0.1` only — never exposed to the network.
 | GET | `/tabs` | — | List browser tabs |
 | POST | `/tabs/:id/activate` | — | Switch to a tab |
 
-## Multi-window support
+## Multi-window support and port discovery
 
-Each VS Code window gets its own browser and HTTP server on its own port (starting from 3788, auto-incrementing if taken). The MCP server discovers the correct port by matching your working directory against registered VS Code workspaces.
+Each VS Code window gets its own browser and HTTP server. Ports are assigned automatically starting from 3788 and incrementing if already taken.
 
-Instance registration files are stored in `~/.vscode-browser-bridge/instances/` and cleaned up automatically when VS Code windows close or stale processes are detected.
+### How the MCP server finds the right window
+
+When Claude Code calls a browser tool, the MCP server needs to know which VS Code window to talk to. It resolves this automatically:
+
+1. Each VS Code window registers itself at `~/.vscode-browser-bridge/instances/<hash>.json` with its port, workspace path, and PID
+2. The MCP server reads all instance files and filters out dead processes
+3. It matches `process.cwd()` (Claude Code's working directory) against registered workspace paths — deepest match wins
+4. If no workspace matches, it falls back to the most recently started instance
+
+This means when you run Claude Code inside a VS Code terminal, it automatically connects to the browser in **that** VS Code window.
+
+### Manual override
+
+Set the `BROWSER_BRIDGE_PORT` environment variable to force a specific port:
+
+```bash
+BROWSER_BRIDGE_PORT=3789 claude
+```
+
+### Troubleshooting
+
+If the MCP server connects to the wrong window, check the registered instances:
+
+```bash
+cat ~/.vscode-browser-bridge/instances/*.json
+```
+
+Stale instance files from crashed VS Code windows are cleaned up automatically on the next window startup. You can also delete them manually.
 
 ## Extension settings
 
