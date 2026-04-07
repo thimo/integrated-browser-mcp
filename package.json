@@ -1,9 +1,9 @@
 {
-  "name": "vscode-browser-bridge",
-  "displayName": "VS Code Browser Bridge",
-  "description": "MCP bridge between VS Code's integrated browser and external agents like Claude Code",
+  "name": "vscode-integrated-browser-mcp",
+  "displayName": "Integrated Browser MCP",
+  "description": "Exposes VS Code's integrated browser to external agents via MCP and HTTP",
   "version": "0.0.1",
-  "publisher": "defrog",
+  "publisher": "Thimo Jansen",
   "engines": {
     "vscode": "^1.110.0"
   },

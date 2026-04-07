@@ -13,20 +13,20 @@ export class StatusBar {
 
 	update(cdpState: CDPState, serverRunning: boolean): void {
 		if (!serverRunning) {
-			this.item.text = '$(circle-slash) Browser Bridge';
-			this.item.tooltip = 'Browser Bridge: Off';
+			this.item.text = '$(circle-slash) Browser MCP';
+			this.item.tooltip = 'Browser MCP: Off';
 			this.item.color = undefined;
 		} else if (cdpState === 'connected') {
-			this.item.text = '$(broadcast) Browser Bridge';
-			this.item.tooltip = 'Browser Bridge: Connected';
+			this.item.text = '$(broadcast) Browser MCP';
+			this.item.tooltip = 'Browser MCP: Connected';
 			this.item.color = new vscode.ThemeColor('statusBarItem.prominentForeground');
 		} else if (cdpState === 'connecting') {
-			this.item.text = '$(sync~spin) Browser Bridge';
-			this.item.tooltip = 'Browser Bridge: Connecting...';
+			this.item.text = '$(sync~spin) Browser MCP';
+			this.item.tooltip = 'Browser MCP: Connecting...';
 			this.item.color = undefined;
 		} else {
-			this.item.text = '$(warning) Browser Bridge';
-			this.item.tooltip = 'Browser Bridge: Disconnected';
+			this.item.text = '$(warning) Browser MCP';
+			this.item.tooltip = 'Browser MCP: Disconnected';
 			this.item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
 		}
 	}

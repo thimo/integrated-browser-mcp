@@ -54,7 +54,7 @@ function instanceId(workspacePath: string): string {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-	log = vscode.window.createOutputChannel('Browser Bridge');
+	log = vscode.window.createOutputChannel('Integrated Browser MCP');
 	statusBar = new StatusBar();
 
 	context.subscriptions.push(
@@ -83,7 +83,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 	if (running) {
-		vscode.window.showInformationMessage('Browser Bridge is already running.');
+		vscode.window.showInformationMessage('Browser MCP is already running.');
 		return;
 	}
 
@@ -128,7 +128,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		log.appendLine(`[Bridge] Started successfully on port ${port}`);
 	} catch (err) {
 		log.appendLine(`[Bridge] Failed to start: ${err}`);
-		vscode.window.showErrorMessage(`Browser Bridge failed to start: ${err}`);
+		vscode.window.showErrorMessage(`Browser MCP failed to start: ${err}`);
 		await stopBridge();
 	}
 }
@@ -157,7 +157,7 @@ async function launchBrowser(): Promise<void> {
 	const launched = await vscode.debug.startDebugging(undefined, {
 		type: 'editor-browser',
 		request: 'launch',
-		name: 'Browser Bridge',
+		name: 'Browser MCP',
 		url: 'about:blank',
 		internalConsoleOptions: 'neverOpen',
 	}, {
@@ -301,7 +301,7 @@ function showStatus(): void {
 	const port = actualPort ?? 'none';
 
 	vscode.window.showInformationMessage(
-		`Browser Bridge: CDP ${cdpState}, HTTP server ${serverState} on port ${port}`,
+		`Browser MCP: CDP ${cdpState}, HTTP server ${serverState} on port ${port}`,
 	);
 }
 

@@ -78,7 +78,7 @@ async function bridgeFetch(urlPath: string, options?: RequestInit): Promise<{ ok
 		const res = await fetch(`${base}${urlPath}`, options);
 		return await res.json() as { ok: boolean; data?: unknown; error?: string };
 	} catch {
-		return { ok: false, error: 'VS Code Browser Bridge is not reachable. Make sure VS Code is running with the Browser Bridge extension active.' };
+		return { ok: false, error: 'Integrated Browser MCP is not reachable. Make sure VS Code is running with the extension active.' };
 	}
 }
 
@@ -102,7 +102,7 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 }
 
 const server = new McpServer({
-	name: 'vscode-browser-bridge',
+	name: 'integrated-browser-mcp',
 	version: '0.0.1',
 });
 
