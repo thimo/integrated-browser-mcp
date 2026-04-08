@@ -4,3 +4,5 @@ dist/
 *.vsix
 .vscode-test/
 *.js.map
+.claude/
+.DS_Store
