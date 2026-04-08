@@ -61,13 +61,19 @@ function discoverPort(): number | null {
 	return null;
 }
 
+let cachedPort: number | null = null;
+
 function getBridgeUrl(): string {
 	// Env var override takes priority (for testing / manual config)
 	if (process.env.BROWSER_BRIDGE_PORT) {
 		return `http://127.0.0.1:${process.env.BROWSER_BRIDGE_PORT}`;
 	}
+	if (cachedPort) {
+		return `http://127.0.0.1:${cachedPort}`;
+	}
 	const port = discoverPort();
 	if (port) {
+		cachedPort = port;
 		return `http://127.0.0.1:${port}`;
 	}
 	// Last resort default
@@ -80,6 +86,17 @@ async function bridgeFetch(urlPath: string, options?: RequestInit): Promise<{ ok
 		const res = await fetch(`${base}${urlPath}`, options);
 		return await res.json() as { ok: boolean; data?: unknown; error?: string };
 	} catch {
+		// Connection failed — invalidate cache and retry discovery once
+		if (cachedPort) {
+			cachedPort = null;
+			const base = getBridgeUrl();
+			try {
+				const res = await fetch(`${base}${urlPath}`, options);
+				return await res.json() as { ok: boolean; data?: unknown; error?: string };
+			} catch {
+				// Still failing
+			}
+		}
 		return { ok: false, error: 'Integrated Browser MCP is not reachable. Make sure VS Code is running with the extension active.' };
 	}
 }
@@ -212,6 +229,14 @@ server.tool(
 		if (filter) params.set('filter', filter);
 		return toMcpResult(await bridgeFetch(`/network?${params}`));
 	},
+);
+
+// Network clear
+server.tool(
+	'browser_network_clear',
+	'Clear the buffered network request log',
+	{},
+	async () => toMcpResult(await bridgeFetch('/network/clear', { method: 'POST' })),
 );
 
 // URL

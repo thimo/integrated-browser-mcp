@@ -35,6 +35,9 @@ export class CDPConnection {
 	private _onStateChange = new vscode.EventEmitter<CDPState>();
 	readonly onStateChange = this._onStateChange.event;
 
+	private _sessionId: string | null = null;
+	private _session: vscode.DebugSession | null = null;
+
 	private consoleBuffer: ConsoleEntry[] = [];
 	private networkBuffer: NetworkEntry[] = [];
 	private networkMap = new Map<string, NetworkEntry>();
@@ -48,6 +51,11 @@ export class CDPConnection {
 
 	get state(): CDPState {
 		return this._state;
+	}
+
+	/** The debug session ID we're connected (or connecting) to. */
+	get sessionId(): string | null {
+		return this._sessionId;
 	}
 
 	get console(): ConsoleEntry[] {
@@ -70,6 +78,8 @@ export class CDPConnection {
 
 	async connectToSession(session: vscode.DebugSession): Promise<void> {
 		this.log.appendLine(`[CDP] connectToSession called (session: ${session.name}, id: ${session.id})`);
+		this._session = session;
+		this._sessionId = session.id;
 		this.setState('connecting');
 
 		try {
@@ -80,7 +90,7 @@ export class CDPConnection {
 		} catch (err) {
 			this.log.appendLine(`[CDP] Failed to connect: ${err}`);
 			this.setState('disconnected');
-			this.scheduleReconnect(session);
+			this.scheduleReconnect();
 		}
 	}
 
@@ -103,12 +113,14 @@ export class CDPConnection {
 	private connectWebSocket(url: string): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const ws = new WebSocket(url);
+			let settled = false;
 
 			ws.on('open', async () => {
 				this.ws = ws;
 				this.reconnectAttempts = 0;
 				this.setState('connected');
 				this.log.appendLine('[CDP] WebSocket connected');
+				settled = true;
 				try {
 					await this.enableDomains();
 				} catch (err) {
@@ -145,12 +157,19 @@ export class CDPConnection {
 				this.pending.clear();
 				if (!this.disposed) {
 					this.setState('disconnected');
+					// Reconnect on unexpected mid-session drops
+					if (settled) {
+						this.scheduleReconnect();
+					}
 				}
 			});
 
 			ws.on('error', (err) => {
 				this.log.appendLine(`[CDP] WebSocket error: ${err.message}`);
-				reject(err);
+				if (!settled) {
+					settled = true;
+					reject(err);
+				}
 			});
 		});
 	}
@@ -244,18 +263,21 @@ export class CDPConnection {
 		});
 	}
 
-	private scheduleReconnect(session: vscode.DebugSession): void {
-		if (this.disposed || this.reconnectTimer) return;
+	private scheduleReconnect(): void {
+		if (this.disposed || this.reconnectTimer || !this._session) return;
 		if (this.reconnectAttempts >= CDPConnection.MAX_RECONNECT_ATTEMPTS) {
 			this.log.appendLine(`[CDP] Max reconnect attempts (${CDPConnection.MAX_RECONNECT_ATTEMPTS}) reached, giving up`);
+			this._session = null;
+			this._sessionId = null;
 			return;
 		}
 		const delay = CDPConnection.BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts);
 		this.reconnectAttempts++;
+		const session = this._session;
 		this.log.appendLine(`[CDP] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${CDPConnection.MAX_RECONNECT_ATTEMPTS})`);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
-			if (!this.disposed && this._state === 'disconnected') {
+			if (!this.disposed && this._state === 'disconnected' && this._session === session) {
 				this.connectToSession(session);
 			}
 		}, delay);
@@ -266,6 +288,8 @@ export class CDPConnection {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
+		this._session = null;
+		this._sessionId = null;
 		if (this.ws) {
 			this.ws.close();
 			this.ws = null;

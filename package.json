@@ -3,7 +3,7 @@
   "displayName": "Integrated Browser MCP",
   "description": "Exposes VS Code's integrated browser to external agents via MCP and HTTP",
   "version": "0.0.1",
-  "publisher": "Thimo Jansen",
+  "publisher": "defrog",
   "engines": {
     "vscode": "^1.110.0"
   },

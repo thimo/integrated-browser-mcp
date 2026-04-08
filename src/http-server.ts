@@ -134,7 +134,7 @@ export class BridgeServer {
 					res.json({ ok: false, error: 'Missing selector or text' });
 					return;
 				}
-				// Focus the element then dispatch key events
+				// Focus the element
 				const selectorJson = JSON.stringify(selector);
 				const focusResult = await this.cdp.send('Runtime.evaluate', {
 					expression: `(() => {
@@ -151,17 +151,10 @@ export class BridgeServer {
 					res.json({ ok: false, error: focusResult.result.value.error });
 					return;
 				}
-				// Type each character
-				for (const char of text) {
-					await this.cdp.send('Input.dispatchKeyEvent', {
-						type: 'keyDown',
-						text: char,
-					});
-					await this.cdp.send('Input.dispatchKeyEvent', {
-						type: 'keyUp',
-						text: char,
-					});
-				}
+				// Use Input.insertText which dispatches beforeinput/input events
+				// that React and other frameworks listen to (keyDown/keyUp alone
+				// does not update controlled inputs).
+				await this.cdp.send('Input.insertText', { text });
 				res.json({ ok: true, data: { typed: text.length } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
@@ -329,6 +322,8 @@ export class BridgeServer {
 	stop(): Promise<void> {
 		return new Promise((resolve) => {
 			if (this.server) {
+				// Close keep-alive connections so close() doesn't hang
+				this.server.closeAllConnections();
 				this.server.close(() => resolve());
 				this.server = null;
 			} else {

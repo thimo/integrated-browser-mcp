@@ -85,7 +85,7 @@ All responses: `{ ok: true, data: ... }` or `{ ok: false, error: "..." }`
 Wraps the HTTP API as MCP tools so Claude Code can use it natively without curl.
 Follows the pattern from `andrewmkhoury/vscode-claude-code-bridge`:
 - MCP server is a Node.js stdio process bundled into the extension
-- Extension auto-writes MCP config to `~/.claude/settings.json` on activation
+- Extension auto-writes MCP config to `~/.claude.json` on activation
 - Uses `@modelcontextprotocol/sdk` for the MCP implementation
 
 MCP tools to expose (map 1:1 to HTTP endpoints):

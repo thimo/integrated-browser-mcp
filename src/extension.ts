@@ -58,8 +58,15 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 		}),
 		vscode.debug.onDidTerminateDebugSession(session => {
-			if (isBrowserSession(session)) {
-				cdp?.disconnect();
+			// Only disconnect if this is the session we're actually connected to
+			// (or its parent). Avoids killing the bridge when unrelated browser
+			// sessions terminate.
+			if (!cdp || cdp.state === 'disconnected') return;
+			const isOurSession = cdp.sessionId === session.id;
+			const isOurParent = cdp.sessionId && session.type && isBrowserSession(session)
+				&& vscode.debug.activeDebugSession?.id !== cdp.sessionId;
+			if (isOurSession || isOurParent) {
+				cdp.disconnect();
 			}
 		}),
 	);
@@ -123,16 +130,30 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 async function ensureBrowser(): Promise<void> {
 	if (cdp?.state === 'connected') return;
 	if (browserLaunching || cdp?.state === 'connecting') {
-		// Wait for the in-progress connection attempt to settle
-		await new Promise<void>(resolve => {
-			const check = () => {
-				if (cdp?.state === 'connected' || cdp?.state === 'disconnected') {
+		// Wait for the in-progress connection attempt to finish
+		await new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				disposable.dispose();
+				reject(new Error('Timed out waiting for browser connection'));
+			}, 45000);
+			const disposable = cdp.onStateChange(state => {
+				if (state === 'connected') {
+					clearTimeout(timeout);
 					disposable.dispose();
 					resolve();
+				} else if (state === 'disconnected' && !browserLaunching) {
+					// Only give up if no launch is in progress
+					clearTimeout(timeout);
+					disposable.dispose();
+					reject(new Error('Browser connection failed'));
 				}
-			};
-			const disposable = cdp.onStateChange(check);
-			check(); // resolve immediately if state already changed
+			});
+			// Check immediately in case state already changed
+			if (cdp?.state === 'connected') {
+				clearTimeout(timeout);
+				disposable.dispose();
+				resolve();
+			}
 		});
 		return;
 	}
@@ -158,15 +179,20 @@ async function launchBrowser(): Promise<void> {
 	// vscode-js-debug creates a root session (the launcher) and a child session
 	// for each page target. requestCDPProxy only works on the child session
 	// which has the actual CDP connection.
+	let disposed = false;
+	let timeout: ReturnType<typeof setTimeout>;
+	let disposable: vscode.Disposable;
+
 	const childPromise = new Promise<vscode.DebugSession | null>((resolve) => {
-		const timeout = setTimeout(() => {
+		timeout = setTimeout(() => {
 			disposable.dispose();
 			log.appendLine('[Bridge] Timed out waiting for child browser session');
 			resolve(null);
 		}, 15000);
-		const disposable = vscode.debug.onDidStartDebugSession(session => {
+		disposable = vscode.debug.onDidStartDebugSession(session => {
 			if (isBrowserSession(session) && session.parentSession) {
 				log.appendLine(`[Bridge] Child session started: ${session.name} (parent: ${session.parentSession.name})`);
+				disposed = true;
 				clearTimeout(timeout);
 				disposable.dispose();
 				resolve(session);
@@ -190,6 +216,10 @@ async function launchBrowser(): Promise<void> {
 		suppressDebugStatusbar: true,
 	} as vscode.DebugSessionOptions);
 	if (!launched) {
+		if (!disposed) {
+			clearTimeout(timeout!);
+			disposable!.dispose();
+		}
 		log.appendLine('[Bridge] Failed to launch browser session');
 		return;
 	}
