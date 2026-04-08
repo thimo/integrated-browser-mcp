@@ -174,6 +174,47 @@ export class CDPConnection {
 		});
 	}
 
+	private titleScriptId: string | null = null;
+
+	private static readonly TITLE_SCRIPT = `
+		(function() {
+			var P = '\\u{1F534} ';
+			var updating = false;
+
+			function ensurePrefix() {
+				if (updating) return;
+				var el = document.querySelector('title');
+				if (!el) return;
+				if (!el.textContent.startsWith(P)) {
+					updating = true;
+					el.textContent = P + el.textContent;
+					updating = false;
+				}
+			}
+
+			// Watch for any title changes (HTML parsing, JS, SPA navigation)
+			new MutationObserver(ensurePrefix).observe(document, {
+				childList: true,
+				subtree: true,
+				characterData: true,
+			});
+
+			// Also intercept JS document.title setter
+			var og = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
+			if (og) {
+				Object.defineProperty(document, 'title', {
+					get: function() { return og.get.call(this); },
+					set: function(v) {
+						og.set.call(this, v.startsWith(P) ? v : P + v);
+					},
+					configurable: true,
+				});
+			}
+
+			ensurePrefix();
+		})();
+	`;
+
 	private async enableDomains(): Promise<void> {
 		await Promise.all([
 			this.send('Runtime.enable'),
@@ -183,6 +224,53 @@ export class CDPConnection {
 			this.send('Accessibility.enable'),
 		]);
 		this.log.appendLine('[CDP] Domains enabled');
+		await this.installTitlePrefix();
+	}
+
+	private async installTitlePrefix(): Promise<void> {
+		try {
+			// Inject on every future page load
+			const result = await this.send('Page.addScriptToEvaluateOnNewDocument', {
+				source: CDPConnection.TITLE_SCRIPT,
+			}) as { identifier: string };
+			this.titleScriptId = result.identifier;
+			this.log.appendLine(`[CDP] Title prefix script installed (id: ${this.titleScriptId})`);
+
+			// Also apply to the current page immediately
+			await this.send('Runtime.evaluate', {
+				expression: CDPConnection.TITLE_SCRIPT,
+			});
+			this.log.appendLine('[CDP] Title prefix applied to current page');
+		} catch (err) {
+			this.log.appendLine(`[CDP] Failed to install title prefix: ${err}`);
+		}
+	}
+
+	private async removeTitlePrefix(): Promise<void> {
+		try {
+			if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+				if (this.titleScriptId) {
+					await this.send('Page.removeScriptToEvaluateOnNewDocument', {
+						identifier: this.titleScriptId,
+					}).catch(() => {});
+					this.titleScriptId = null;
+				}
+				await this.send('Runtime.evaluate', {
+					expression: `
+						(function() {
+							var P = '\\u{1F534} ';
+							delete document.title;
+							var og = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
+							if (og && og.get.call(document).startsWith(P)) {
+								og.set.call(document, og.get.call(document).slice(P.length));
+							}
+						})();
+					`,
+				}, 2000);
+			}
+		} catch {
+			// Best-effort cleanup
+		}
 	}
 
 	private handleEvent(method: string, params: Record<string, unknown>): void {
@@ -283,13 +371,14 @@ export class CDPConnection {
 		}, delay);
 	}
 
-	disconnect(): void {
+	async disconnect(): Promise<void> {
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
 		this._session = null;
 		this._sessionId = null;
+		await this.removeTitlePrefix();
 		if (this.ws) {
 			this.ws.close();
 			this.ws = null;
