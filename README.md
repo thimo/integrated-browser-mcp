@@ -1,4 +1,4 @@
-# VS Code Browser Bridge
+# Integrated Browser MCP
 
 Exposes VS Code's integrated browser to external agents (Claude Code, scripts, curl) via a local HTTP API and MCP server.
 
@@ -35,13 +35,13 @@ use browser_navigate to open http://localhost:3000
 Or reference the MCP server:
 
 ```
-use the vscode-browser-bridge to open my app
+use the integrated-browser-mcp to open my app
 ```
 
 To avoid Claude Code picking the wrong browser tool, add this to your project's `CLAUDE.md`:
 
 ```
-For browser automation, use the vscode-browser-bridge MCP tools (browser_navigate, browser_screenshot, etc.), not the claude-in-chrome tools.
+For browser automation, use the integrated-browser-mcp MCP tools (browser_navigate, browser_screenshot, etc.), not the claude-in-chrome tools.
 ```
 
 ### Usage with curl
@@ -113,7 +113,7 @@ Each VS Code window gets its own browser and HTTP server. Ports are assigned aut
 
 When Claude Code calls a browser tool, the MCP server needs to know which VS Code window to talk to. It resolves this automatically:
 
-1. Each VS Code window registers itself at `~/.vscode-browser-bridge/instances/<hash>.json` with its port, workspace path, and PID
+1. Each VS Code window registers itself at `~/.integrated-browser-mcp/instances/<hash>.json` with its port, workspace path, and PID
 2. The MCP server reads all instance files and filters out dead processes
 3. It matches `process.cwd()` (Claude Code's working directory) against registered workspace paths — deepest match wins
 4. If no workspace matches, it falls back to the most recently started instance
@@ -133,7 +133,7 @@ BROWSER_BRIDGE_PORT=3789 claude
 If the MCP server connects to the wrong window, check the registered instances:
 
 ```bash
-cat ~/.vscode-browser-bridge/instances/*.json
+cat ~/.integrated-browser-mcp/instances/*.json
 ```
 
 Stale instance files from crashed VS Code windows are cleaned up automatically on the next window startup. You can also delete them manually.

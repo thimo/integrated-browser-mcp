@@ -28,6 +28,9 @@ export class CDPConnection {
 	private requestId = 0;
 	private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	private reconnectAttempts = 0;
+	private static readonly MAX_RECONNECT_ATTEMPTS = 5;
+	private static readonly BASE_RECONNECT_DELAY = 1000;
 	private _state: CDPState = 'disconnected';
 	private _onStateChange = new vscode.EventEmitter<CDPState>();
 	readonly onStateChange = this._onStateChange.event;
@@ -66,17 +69,35 @@ export class CDPConnection {
 	}
 
 	async connectToSession(session: vscode.DebugSession): Promise<void> {
+		this.log.appendLine(`[CDP] connectToSession called (session: ${session.name}, id: ${session.id})`);
 		this.setState('connecting');
+
 		try {
-			const proxy = await session.customRequest('requestCDPProxy') as { host: string; port: number; path?: string };
+			const proxy = await this.requestCDPProxy(session);
 			const wsUrl = `ws://${proxy.host}:${proxy.port}${proxy.path ?? ''}`;
-			this.log.appendLine(`[CDP] Connecting to ${wsUrl}`);
+			this.log.appendLine(`[CDP] Connecting WebSocket to ${wsUrl}`);
 			await this.connectWebSocket(wsUrl);
 		} catch (err) {
-			this.log.appendLine(`[CDP] Failed to get CDP proxy: ${err}`);
+			this.log.appendLine(`[CDP] Failed to connect: ${err}`);
 			this.setState('disconnected');
 			this.scheduleReconnect(session);
 		}
+	}
+
+	private async requestCDPProxy(
+		session: vscode.DebugSession,
+	): Promise<{ host: string; port: number; path?: string }> {
+		// Must be called on a CHILD debug session (the page target), not the
+		// root launcher session. The root session has no CDP connection.
+		this.log.appendLine('[CDP] Requesting CDP proxy...');
+		const proxy = await Promise.race([
+			session.customRequest('requestCDPProxy'),
+			new Promise<never>((_, reject) =>
+				setTimeout(() => reject(new Error('requestCDPProxy timed out after 30s')), 30000),
+			),
+		]) as { host: string; port: number; path?: string };
+		this.log.appendLine(`[CDP] Got proxy: ${JSON.stringify(proxy)}`);
+		return proxy;
 	}
 
 	private connectWebSocket(url: string): Promise<void> {
@@ -85,6 +106,7 @@ export class CDPConnection {
 
 			ws.on('open', async () => {
 				this.ws = ws;
+				this.reconnectAttempts = 0;
 				this.setState('connected');
 				this.log.appendLine('[CDP] WebSocket connected');
 				try {
@@ -139,7 +161,9 @@ export class CDPConnection {
 			this.send('Page.enable'),
 			this.send('Network.enable'),
 			this.send('DOM.enable'),
+			this.send('Accessibility.enable'),
 		]);
+		this.log.appendLine('[CDP] Domains enabled');
 	}
 
 	private handleEvent(method: string, params: Record<string, unknown>): void {
@@ -201,26 +225,40 @@ export class CDPConnection {
 		}
 	}
 
-	send(method: string, params?: Record<string, unknown>): Promise<unknown> {
+	send(method: string, params?: Record<string, unknown>, timeoutMs = 30000): Promise<unknown> {
 		return new Promise((resolve, reject) => {
 			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error('CDP not connected'));
 				return;
 			}
 			const id = ++this.requestId;
-			this.pending.set(id, { resolve, reject });
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new Error(`CDP request timed out after ${timeoutMs}ms: ${method}`));
+			}, timeoutMs);
+			this.pending.set(id, {
+				resolve: (v) => { clearTimeout(timer); resolve(v); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
 			this.ws.send(JSON.stringify({ id, method, params }));
 		});
 	}
 
 	private scheduleReconnect(session: vscode.DebugSession): void {
 		if (this.disposed || this.reconnectTimer) return;
+		if (this.reconnectAttempts >= CDPConnection.MAX_RECONNECT_ATTEMPTS) {
+			this.log.appendLine(`[CDP] Max reconnect attempts (${CDPConnection.MAX_RECONNECT_ATTEMPTS}) reached, giving up`);
+			return;
+		}
+		const delay = CDPConnection.BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts);
+		this.reconnectAttempts++;
+		this.log.appendLine(`[CDP] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${CDPConnection.MAX_RECONNECT_ATTEMPTS})`);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			if (!this.disposed && this._state === 'disconnected') {
 				this.connectToSession(session);
 			}
-		}, 3000);
+		}, delay);
 	}
 
 	disconnect(): void {

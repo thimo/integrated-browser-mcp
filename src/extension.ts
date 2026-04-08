@@ -2,14 +2,13 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import * as net from 'net';
 import * as crypto from 'crypto';
 import { CDPConnection } from './cdp';
 import { BridgeServer } from './http-server';
 import { StatusBar } from './status-bar';
 
-const MCP_KEY = 'vscode-browser-bridge';
-const STABLE_DIR = path.join(os.homedir(), '.vscode-browser-bridge');
+const MCP_KEY = 'integrated-browser-mcp';
+const STABLE_DIR = path.join(os.homedir(), '.integrated-browser-mcp');
 const STABLE_SERVER = path.join(STABLE_DIR, 'mcp-server.mjs');
 const INSTANCES_DIR = path.join(STABLE_DIR, 'instances');
 
@@ -22,27 +21,11 @@ let instanceFile: string | null = null;
 let actualPort: number | null = null;
 let browserLaunching = false;
 
-function findFreePort(startPort: number): Promise<number> {
-	return new Promise((resolve, reject) => {
-		const server = net.createServer();
-		server.once('error', () => {
-			if (startPort < 65535) {
-				resolve(findFreePort(startPort + 1));
-			} else {
-				reject(new Error('No free port found'));
-			}
-		});
-		server.once('listening', () => {
-			server.close();
-			resolve(startPort);
-		});
-		server.listen(startPort, '127.0.0.1');
-	});
-}
-
 function isBrowserSession(session: vscode.DebugSession): boolean {
 	return session.type === 'pwa-editor-browser'
-		|| session.type === 'editor-browser';
+		|| session.type === 'editor-browser'
+		|| session.type === 'pwa-chrome'
+		|| session.type === 'chrome';
 }
 
 function getWorkspacePath(): string {
@@ -50,7 +33,9 @@ function getWorkspacePath(): string {
 }
 
 function instanceId(workspacePath: string): string {
-	return crypto.createHash('md5').update(workspacePath).digest('hex').slice(0, 12);
+	// Use PID as fallback when no workspace folder is open to avoid collisions
+	const key = workspacePath || `pid-${process.pid}`;
+	return crypto.createHash('md5').update(key).digest('hex').slice(0, 12);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -64,8 +49,12 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('browserBridge.stop', stopBridge),
 		vscode.commands.registerCommand('browserBridge.status', showStatus),
 		vscode.debug.onDidStartDebugSession(session => {
-			if (isBrowserSession(session) && cdp?.state === 'disconnected') {
-				cdp.connectToSession(session);
+			// Auto-connect to externally launched browser child sessions.
+			// Skip root sessions (no CDP) and skip if launchBrowser() is handling it.
+			if (isBrowserSession(session) && session.parentSession && cdp?.state === 'disconnected' && !browserLaunching) {
+				cdp.connectToSession(session).catch(err => {
+					log.appendLine(`[Bridge] Auto-connect failed: ${err}`);
+				});
 			}
 		}),
 		vscode.debug.onDidTerminateDebugSession(session => {
@@ -94,9 +83,6 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		// 0. Clean up stale instance files from dead processes
 		await cleanStaleInstances();
 
-		const port = await findFreePort(preferredPort);
-		actualPort = port;
-
 		// 1. CDP connection
 		cdp = new CDPConnection(log);
 		cdp.onStateChange(state => statusBar.update(state, running));
@@ -104,7 +90,8 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		// 2. HTTP server (with lazy browser launch callback)
 		httpServer = new BridgeServer(cdp, log);
 		httpServer.setEnsureBrowser(() => ensureBrowser());
-		await httpServer.start(port);
+		const port = await httpServer.start(preferredPort);
+		actualPort = port;
 		running = true;
 		statusBar.update(cdp.state, true);
 
@@ -134,7 +121,21 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 }
 
 async function ensureBrowser(): Promise<void> {
-	if (cdp?.state === 'connected' || browserLaunching) return;
+	if (cdp?.state === 'connected') return;
+	if (browserLaunching || cdp?.state === 'connecting') {
+		// Wait for the in-progress connection attempt to settle
+		await new Promise<void>(resolve => {
+			const check = () => {
+				if (cdp?.state === 'connected' || cdp?.state === 'disconnected') {
+					disposable.dispose();
+					resolve();
+				}
+			};
+			const disposable = cdp.onStateChange(check);
+			check(); // resolve immediately if state already changed
+		});
+		return;
+	}
 	browserLaunching = true;
 	try {
 		await launchBrowser();
@@ -154,8 +155,30 @@ async function stopBridge(): Promise<void> {
 }
 
 async function launchBrowser(): Promise<void> {
+	// vscode-js-debug creates a root session (the launcher) and a child session
+	// for each page target. requestCDPProxy only works on the child session
+	// which has the actual CDP connection.
+	const childPromise = new Promise<vscode.DebugSession | null>((resolve) => {
+		const timeout = setTimeout(() => {
+			disposable.dispose();
+			log.appendLine('[Bridge] Timed out waiting for child browser session');
+			resolve(null);
+		}, 15000);
+		const disposable = vscode.debug.onDidStartDebugSession(session => {
+			if (isBrowserSession(session) && session.parentSession) {
+				log.appendLine(`[Bridge] Child session started: ${session.name} (parent: ${session.parentSession.name})`);
+				clearTimeout(timeout);
+				disposable.dispose();
+				resolve(session);
+			}
+		});
+	});
+
+	const config = vscode.workspace.getConfiguration('browserBridge');
+	const browserType = config.get<string>('browserType', 'editor-browser');
+
 	const launched = await vscode.debug.startDebugging(undefined, {
-		type: 'editor-browser',
+		type: browserType,
 		request: 'launch',
 		name: 'Browser MCP',
 		url: 'about:blank',
@@ -167,32 +190,21 @@ async function launchBrowser(): Promise<void> {
 		suppressDebugStatusbar: true,
 	} as vscode.DebugSessionOptions);
 	if (!launched) {
-		log.appendLine('[Bridge] Failed to launch editor-browser session');
+		log.appendLine('[Bridge] Failed to launch browser session');
 		return;
 	}
-	await new Promise<void>((resolve) => {
-		const sessions: vscode.DebugSession[] = [];
-		const disposable = vscode.debug.onDidStartDebugSession(session => {
-			if (isBrowserSession(session)) {
-				sessions.push(session);
-			}
-		});
-		setTimeout(async () => {
-			disposable.dispose();
-			if (sessions.length === 0) {
-				log.appendLine('[Bridge] No browser sessions found');
-				resolve();
-				return;
-			}
-			const target = sessions[sessions.length - 1];
-			try {
-				await cdp.connectToSession(target);
-			} catch (err) {
-				log.appendLine(`[Bridge] CDP connect error: ${err}`);
-			}
-			resolve();
-		}, 3000);
-	});
+
+	const session = await childPromise;
+	if (!session) {
+		log.appendLine('[Bridge] No child browser session started');
+		return;
+	}
+
+	try {
+		await cdp.connectToSession(session);
+	} catch (err) {
+		log.appendLine(`[Bridge] CDP connect error: ${err}`);
+	}
 }
 
 async function cleanStaleInstances(): Promise<void> {
@@ -276,16 +288,17 @@ async function configureClaude(): Promise<void> {
 
 		const mcpServers = (config.mcpServers ?? {}) as Record<string, unknown>;
 
-		const existing = mcpServers[MCP_KEY] as { args?: string[]; env?: unknown } | undefined;
-		if (existing?.args?.[0] === STABLE_SERVER && !existing.env) {
+		const desired = { command: 'node', args: [STABLE_SERVER] };
+		const existing = mcpServers[MCP_KEY] as { command?: string; args?: string[]; env?: unknown } | undefined;
+		if (existing?.command === desired.command
+			&& existing?.args?.[0] === desired.args[0]
+			&& existing?.args?.length === 1
+			&& !existing.env) {
 			log.appendLine('[MCP] Claude already configured');
 			return;
 		}
 
-		mcpServers[MCP_KEY] = {
-			command: 'node',
-			args: [STABLE_SERVER],
-		};
+		mcpServers[MCP_KEY] = desired;
 		config.mcpServers = mcpServers;
 
 		await fs.promises.writeFile(claudeSettingsPath, JSON.stringify(config, null, 2) + '\n');

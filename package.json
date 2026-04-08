@@ -1,5 +1,5 @@
 {
-  "name": "vscode-integrated-browser-mcp",
+  "name": "integrated-browser-mcp",
   "displayName": "Integrated Browser MCP",
   "description": "Exposes VS Code's integrated browser to external agents via MCP and HTTP",
   "version": "0.0.1",
@@ -41,6 +41,16 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically start the bridge when VS Code opens"
+        },
+        "browserBridge.browserType": {
+          "type": "string",
+          "default": "editor-browser",
+          "enum": ["editor-browser", "chrome"],
+          "enumDescriptions": [
+            "VS Code integrated browser (runs inside VS Code)",
+            "External Chrome window (more reliable CDP support)"
+          ],
+          "description": "Which browser type to launch for automation"
         }
       }
     }
@@ -52,7 +62,7 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-types && node esbuild.js --production",
-    "check-types": "tsc --noEmit",
+    "check-types": "tsc --noEmit && tsc --noEmit -p tsconfig.mcp.json",
     "lint": "eslint src",
     "test": "vscode-test"
   },

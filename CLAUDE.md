@@ -1,4 +1,4 @@
-# vscode-browser-bridge
+# integrated-browser-mcp
 
 A VS Code extension that exposes VS Code's **integrated browser** to external agents (Claude Code, scripts, curl) via a local HTTP API and MCP server. This gives Claude Code the same browser automation capabilities that GitHub Copilot has natively — but agent-agnostic.
 
@@ -111,7 +111,7 @@ These feed the `/console` and `/network` endpoints.
 
 ## File structure
 ```
-vscode-browser-bridge/
+integrated-browser-mcp/
 ├── src/
 │   ├── extension.ts        # Activation, debug session management, wires everything together
 │   ├── cdp.ts              # CDP WebSocket connection, requestCDPProxy, event buffering
@@ -147,4 +147,4 @@ Start immediately when VS Code opens — don't wait for a command.
 
 ## Publishing target
 VS Code Marketplace under publisher `defrog` (or create one).
-Extension ID: `defrog.vscode-browser-bridge`
+Extension ID: `defrog.integrated-browser-mcp`

@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-const INSTANCES_DIR = path.join(os.homedir(), '.vscode-browser-bridge', 'instances');
+const INSTANCES_DIR = path.join(os.homedir(), '.integrated-browser-mcp', 'instances');
 
 interface Instance {
 	port: number;
@@ -43,7 +43,9 @@ function discoverPort(): number | null {
 		// Sort by workspace length descending so deeper paths match first
 		instances.sort((a, b) => b.workspace.length - a.workspace.length);
 		for (const inst of instances) {
-			if (inst.workspace && cwd.startsWith(inst.workspace)) {
+			if (!inst.workspace) continue;
+			// Ensure match is on a path boundary (exact match or followed by separator)
+			if (cwd === inst.workspace || cwd.startsWith(inst.workspace + path.sep)) {
 				return inst.port;
 			}
 		}

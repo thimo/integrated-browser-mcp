@@ -103,10 +103,12 @@ export class BridgeServer {
 					return;
 				}
 				// Use Runtime.evaluate to find and click the element
+				const selectorJson = JSON.stringify(selector);
 				const result = await this.cdp.send('Runtime.evaluate', {
 					expression: `(() => {
-						const el = document.querySelector(${JSON.stringify(selector)});
-						if (!el) return { error: 'Element not found: ${selector}' };
+						const sel = ${selectorJson};
+						const el = document.querySelector(sel);
+						if (!el) return { error: 'Element not found: ' + sel };
 						el.click();
 						return { clicked: true };
 					})()`,
@@ -133,10 +135,12 @@ export class BridgeServer {
 					return;
 				}
 				// Focus the element then dispatch key events
+				const selectorJson = JSON.stringify(selector);
 				const focusResult = await this.cdp.send('Runtime.evaluate', {
 					expression: `(() => {
-						const el = document.querySelector(${JSON.stringify(selector)});
-						if (!el) return { error: 'Element not found: ${selector}' };
+						const sel = ${selectorJson};
+						const el = document.querySelector(sel);
+						if (!el) return { error: 'Element not found: ' + sel };
 						el.focus();
 						return { focused: true };
 					})()`,
@@ -167,7 +171,9 @@ export class BridgeServer {
 		// Scroll
 		this.app.post('/scroll', cdpGuard, async (req, res) => {
 			try {
-				const { deltaX = 0, deltaY = 0, selector } = req.body;
+				const deltaX = Number(req.body.deltaX) || 0;
+				const deltaY = Number(req.body.deltaY) || 0;
+				const { selector } = req.body;
 				if (selector) {
 					await this.cdp.send('Runtime.evaluate', {
 						expression: `document.querySelector(${JSON.stringify(selector)})?.scrollBy(${deltaX}, ${deltaY})`,
@@ -221,16 +227,16 @@ export class BridgeServer {
 		});
 
 		// Console
-		this.app.get('/console', (_req, res) => {
-			const limit = parseInt(_req.query.limit as string) || 50;
+		this.app.get('/console', (req, res) => {
+			const limit = parseInt(req.query.limit as string) || 50;
 			const entries = this.cdp.console.slice(-limit);
 			res.json({ ok: true, data: entries });
 		});
 
 		// Network
-		this.app.get('/network', (_req, res) => {
-			const limit = parseInt(_req.query.limit as string) || 50;
-			const filter = _req.query.filter as string | undefined;
+		this.app.get('/network', (req, res) => {
+			const limit = parseInt(req.query.limit as string) || 50;
+			const filter = req.query.filter as string | undefined;
 			let entries = this.cdp.network;
 			if (filter) {
 				entries = entries.filter(e => e.url.includes(filter));
@@ -275,16 +281,46 @@ export class BridgeServer {
 				res.json({ ok: false, error: String(err) });
 			}
 		});
+
+		// Global error handler
+		this.app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+			this.log.appendLine(`[HTTP] Unhandled error: ${err.message}`);
+			res.status(500).json({ ok: false, error: 'Internal server error' });
+		});
 	}
 
-	start(port: number): Promise<void> {
+	get port(): number | null {
+		const addr = this.server?.address();
+		return addr && typeof addr === 'object' ? addr.port : null;
+	}
+
+	async start(preferredPort: number, maxRetries = 20): Promise<number> {
+		for (let attempt = 0; attempt < maxRetries; attempt++) {
+			const port = preferredPort + attempt;
+			try {
+				await this.listen(port);
+				return port;
+			} catch (err: unknown) {
+				if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === 'EADDRINUSE') {
+					this.log.appendLine(`[HTTP] Port ${port} in use, trying next...`);
+					continue;
+				}
+				throw err;
+			}
+		}
+		throw new Error(`No free port found after ${maxRetries} attempts starting from ${preferredPort}`);
+	}
+
+	private listen(port: number): Promise<void> {
 		return new Promise((resolve, reject) => {
-			this.server = this.app.listen(port, '127.0.0.1', () => {
+			const server = this.app.listen(port, '127.0.0.1');
+			server.once('listening', () => {
+				this.server = server;
 				this.log.appendLine(`[HTTP] Server listening on http://127.0.0.1:${port}`);
 				resolve();
 			});
-			this.server.on('error', (err) => {
-				this.log.appendLine(`[HTTP] Server error: ${err.message}`);
+			server.once('error', (err) => {
+				server.close();
 				reject(err);
 			});
 		});
