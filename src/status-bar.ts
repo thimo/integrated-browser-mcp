@@ -15,19 +15,19 @@ export class StatusBar {
 		if (!serverRunning) {
 			this.item.text = '$(circle-slash) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Off';
-			this.item.color = undefined;
+			this.item.backgroundColor = undefined;
 		} else if (cdpState === 'connected') {
 			this.item.text = '$(broadcast) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Connected';
-			this.item.color = new vscode.ThemeColor('statusBarItem.prominentForeground');
+			this.item.backgroundColor = undefined;
 		} else if (cdpState === 'connecting') {
 			this.item.text = '$(sync~spin) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Connecting...';
-			this.item.color = undefined;
+			this.item.backgroundColor = undefined;
 		} else {
 			this.item.text = '$(warning) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Disconnected';
-			this.item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 		}
 	}
 
