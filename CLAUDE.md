@@ -146,5 +146,5 @@ Start immediately when VS Code opens — don't wait for a command.
 - Test with curl against localhost:3788
 
 ## Publishing target
-VS Code Marketplace under publisher `defrog` (or create one).
-Extension ID: `defrog.integrated-browser-mcp`
+VS Code Marketplace under publisher `thimo`.
+Extension ID: `thimo.integrated-browser-mcp`

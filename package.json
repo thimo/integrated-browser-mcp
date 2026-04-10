@@ -1,13 +1,39 @@
 {
   "name": "integrated-browser-mcp",
   "displayName": "Integrated Browser MCP",
-  "description": "Exposes VS Code's integrated browser to external agents via MCP and HTTP",
-  "version": "0.0.1",
-  "publisher": "defrog",
+  "description": "Exposes VS Code's integrated browser to external agents (Claude Code, scripts, curl) via a local HTTP API and MCP server.",
+  "version": "0.1.0",
+  "publisher": "thimo",
+  "license": "MIT",
+  "author": {
+    "name": "Thimo Jansen"
+  },
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thimo/integrated-browser-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thimo/integrated-browser-mcp/issues"
+  },
+  "homepage": "https://github.com/thimo/integrated-browser-mcp#readme",
+  "keywords": [
+    "mcp",
+    "browser",
+    "claude",
+    "claude-code",
+    "automation",
+    "cdp",
+    "chrome-devtools-protocol",
+    "agent",
+    "ai"
+  ],
   "engines": {
     "vscode": "^1.110.0"
   },
   "categories": [
+    "AI",
+    "Debuggers",
     "Other"
   ],
   "activationEvents": [

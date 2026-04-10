@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0F2A44"/>
+      <stop offset="1" stop-color="#061627"/>
+    </linearGradient>
+    <linearGradient id="win" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E6EDF5"/>
+    </linearGradient>
+    <linearGradient id="header" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E9EEF5"/>
+      <stop offset="1" stop-color="#CED7E3"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5AB0FF"/>
+      <stop offset="1" stop-color="#1E88E5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect x="0" y="0" width="128" height="128" rx="24" ry="24" fill="url(#bg)"/>
+
+  <!-- Browser window -->
+  <rect x="16" y="26" width="96" height="76" rx="8" ry="8" fill="#000" opacity="0.35"/>
+  <rect x="14" y="24" width="96" height="76" rx="8" ry="8" fill="url(#win)"/>
+  <path d="M14 32 a8 8 0 0 1 8 -8 h80 a8 8 0 0 1 8 8 v8 h-96 z" fill="url(#header)"/>
+  <circle cx="24" cy="32" r="3" fill="#FF5F57"/>
+  <circle cx="34" cy="32" r="3" fill="#FEBC2E"/>
+  <circle cx="44" cy="32" r="3" fill="#28C840"/>
+  <rect x="54" y="28" width="50" height="8" rx="4" ry="4" fill="#FFFFFF" opacity="0.8"/>
+
+  <!-- Ripples radiating from the sparkle -->
+  <g fill="none" stroke="#1E88E5" stroke-linecap="round">
+    <circle cx="62" cy="70" r="14" stroke-width="2.5" opacity="0.55"/>
+    <circle cx="62" cy="70" r="22" stroke-width="2" opacity="0.3"/>
+    <circle cx="62" cy="70" r="30" stroke-width="1.5" opacity="0.15"/>
+  </g>
+
+  <!-- Sparkle — AI/agent action glyph -->
+  <g transform="translate(62 70)">
+    <!-- Soft glow -->
+    <circle r="9" fill="#5AB0FF" opacity="0.25"/>
+    <!-- 4-point twinkle with concave sides -->
+    <path d="M 0 -16 Q 3 -3 16 0 Q 3 3 0 16 Q -3 3 -16 0 Q -3 -3 0 -16 Z"
+          fill="url(#spark)"/>
+    <!-- Small accent sparkle -->
+    <path d="M 18 -14 Q 19 -9 24 -8 Q 19 -7 18 -2 Q 17 -7 12 -8 Q 17 -9 18 -14 Z"
+          fill="#7FC4FF"/>
+  </g>
+</svg>
