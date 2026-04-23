@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Iframe console and network events are now captured via the primary page session.
-- Optional `target` field on `/console` and `/network` entries for events originating in an attached child CDP session (e.g. `iframe`, `worker`, `service_worker`). Whether child sessions attach depends on the underlying integrated browser; on VS Code 1.116 workers don't propagate through the proxy, on 1.117+ with the [new browserView CDP multiplexer](https://github.com/microsoft/vscode/pull/311049) they may.
+- On VS Code 1.117+ with the [new browserView CDP multiplexer](https://github.com/microsoft/vscode/pull/311049), web worker and service worker targets auto-attach and appear in `/status.children`. Their own `Runtime`/`Network` events are **not** yet forwarded — js-debug's CDP proxy `subscribe` only dispatches events for the main session, so worker-originated logs and requests don't reach the buffers. Full worker event capture needs a migration to VS Code's proposed `browser` API (planned).
+- Optional `target` field on `/console` and `/network` entries, set when events do originate in a tracked child session (currently: iframes on same-session, nothing else in practice).
 - `/status` exposes diagnostic fields: `pageSessionId`, `children`, `consoleBufferSize`, `networkBufferSize`, and per-method `events` counters. Useful for troubleshooting event flow.
 - CDP bootstrap performs an explicit `Target.attachToBrowserTarget` + `Target.attachToTarget` handshake to obtain a page session id, matching the protocol required by VS Code 1.117's integrated browser CDP proxy. Backwards-compatible with 1.112-1.116.
 
