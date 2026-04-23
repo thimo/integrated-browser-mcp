@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] — 2026-04-23
 
+### Fixed
+- Console and network buffers were silently empty. vscode-js-debug's CDP proxy only forwards events the client has explicitly subscribed to; the bridge never subscribed. Now calls `JsDebug.subscribe` for `Runtime.*`, `Network.*`, `Target.*`, and `Page.*` on connect.
+
 ### Added
-- Console and network events from iframes, web workers, and service workers are now captured and included in `/console` and `/network`, tagged with a `target` field (e.g. `worker`, `iframe`, `service_worker`). Requires VS Code 1.117+, which introduced [session multiplexing in the integrated browser CDP proxy](https://github.com/microsoft/vscode/pull/311049). On older versions the bridge keeps working with top-level page events only.
+- Iframe console and network events are now captured via the primary page session.
+- Optional `target` field on `/console` and `/network` entries for events originating in an attached child CDP session (e.g. `iframe`, `worker`, `service_worker`). Whether child sessions attach depends on the underlying integrated browser; on VS Code 1.116 workers don't propagate through the proxy, on 1.117+ with the [new browserView CDP multiplexer](https://github.com/microsoft/vscode/pull/311049) they may.
+- `/status` exposes diagnostic fields: `pageSessionId`, `children`, `consoleBufferSize`, `networkBufferSize`, and per-method `events` counters. Useful for troubleshooting event flow.
+- CDP bootstrap performs an explicit `Target.attachToBrowserTarget` + `Target.attachToTarget` handshake to obtain a page session id, matching the protocol required by VS Code 1.117's integrated browser CDP proxy. Backwards-compatible with 1.112-1.116.
 
 ### Changed
 - Minimum VS Code version bumped from 1.110 to 1.112, where [`editor-browser` became a first-class stable debug type](https://github.com/microsoft/vscode-js-debug/pull/2329) with supported `launch` + `attach`.

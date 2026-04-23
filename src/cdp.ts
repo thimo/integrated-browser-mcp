@@ -48,10 +48,19 @@ export class CDPConnection {
 	private _sessionId: string | null = null;
 	private _session: vscode.DebugSession | null = null;
 
+	/**
+	 * CDP session ID for the primary page target. From VS Code 1.117 on, the
+	 * browser CDP proxy requires explicit `Target.attachToTarget` before page
+	 * commands / events work. All page-scoped `send()` calls are routed here
+	 * unless an explicit `sessionId` override is passed.
+	 */
+	private _pageSessionId: string | null = null;
+
 	private consoleBuffer: ConsoleEntry[] = [];
 	private networkBuffer: NetworkEntry[] = [];
 	private networkMap = new Map<string, NetworkEntry>();
 	private childSessions = new Map<string, ChildTargetInfo>();
+	private eventCounts = new Map<string, number>();
 
 	private log: vscode.OutputChannel;
 	private disposed = false;
@@ -67,6 +76,25 @@ export class CDPConnection {
 	/** The debug session ID we're connected (or connecting) to. */
 	get sessionId(): string | null {
 		return this._sessionId;
+	}
+
+	/** Diagnostic: the CDP sessionId for the primary page target (or null). */
+	get pageSessionId(): string | null {
+		return this._pageSessionId;
+	}
+
+	/** Diagnostic: list of tracked child sessions (workers/iframes). */
+	get children(): Array<{ sessionId: string; type: string; url: string }> {
+		return Array.from(this.childSessions.entries()).map(([sessionId, info]) => ({
+			sessionId,
+			type: info.type,
+			url: info.url,
+		}));
+	}
+
+	/** Diagnostic: CDP event method → count. */
+	get events(): Record<string, number> {
+		return Object.fromEntries(this.eventCounts);
 	}
 
 	get console(): ConsoleEntry[] {
@@ -133,6 +161,8 @@ export class CDPConnection {
 				this.log.appendLine('[CDP] WebSocket connected');
 				settled = true;
 				try {
+					await this.subscribeToEvents();
+					await this.establishPageSession();
 					await this.enableDomains();
 				} catch (err) {
 					this.log.appendLine(`[CDP] Failed to enable domains: ${err}`);
@@ -226,6 +256,72 @@ export class CDPConnection {
 		})();
 	`;
 
+	/**
+	 * vscode-js-debug's CDP proxy only forwards events the client has
+	 * subscribed to (via the synthetic `JsDebug.subscribe` domain). Without
+	 * this, no Runtime/Network/Target events reach our WebSocket — only
+	 * command responses. Supports `Domain.*` wildcards.
+	 * @see vscode-js-debug/src/adapter/cdpProxy.ts
+	 */
+	private async subscribeToEvents(): Promise<void> {
+		try {
+			await this.send('JsDebug.subscribe', {
+				events: ['Runtime.*', 'Network.*', 'Target.*', 'Page.*'],
+			}, { sessionId: null });
+			this.log.appendLine('[CDP] Subscribed to events (Runtime, Network, Target, Page)');
+		} catch (err) {
+			this.log.appendLine(`[CDP] JsDebug.subscribe failed (${err}); events may not flow`);
+		}
+	}
+
+	/**
+	 * In VS Code 1.117+, the browser CDP proxy requires an explicit attach
+	 * to the browser target before Target queries return page targets, and
+	 * page-scoped commands/events must carry the page session id. On older
+	 * versions the proxy auto-routed commands, so we gracefully fall back to
+	 * implicit routing if the handshake isn't supported.
+	 */
+	private async establishPageSession(): Promise<void> {
+		let browserSessionId: string | undefined;
+		try {
+			const r = await this.send('Target.attachToBrowserTarget', undefined, {
+				sessionId: null,
+			}) as { sessionId?: string };
+			browserSessionId = r.sessionId;
+		} catch (err) {
+			this.log.appendLine(`[CDP] attachToBrowserTarget failed (${err}); falling back to implicit routing`);
+			return;
+		}
+		if (!browserSessionId) {
+			this.log.appendLine('[CDP] attachToBrowserTarget returned no sessionId');
+			return;
+		}
+
+		try {
+			const targetsResult = await this.send('Target.getTargets', undefined, {
+				sessionId: browserSessionId,
+			}) as { targetInfos?: Array<{ targetId: string; type: string; url?: string }> };
+			const pages = (targetsResult.targetInfos ?? []).filter(t => t.type === 'page');
+			if (pages.length === 0) {
+				this.log.appendLine('[CDP] No page target found');
+				return;
+			}
+			const page = pages[0];
+			const attachResult = await this.send('Target.attachToTarget', {
+				targetId: page.targetId,
+				flatten: true,
+			}, { sessionId: browserSessionId }) as { sessionId?: string };
+			if (attachResult.sessionId) {
+				this._pageSessionId = attachResult.sessionId;
+				this.log.appendLine(`[CDP] Attached to page session ${attachResult.sessionId} (${page.url ?? page.targetId})`);
+			} else {
+				this.log.appendLine('[CDP] Target.attachToTarget returned no sessionId');
+			}
+		} catch (err) {
+			this.log.appendLine(`[CDP] Page session bootstrap failed (${err})`);
+		}
+	}
+
 	private async enableDomains(): Promise<void> {
 		await Promise.all([
 			this.send('Runtime.enable'),
@@ -240,10 +336,12 @@ export class CDPConnection {
 	}
 
 	/**
-	 * Subscribe to iframe/worker targets so their Runtime/Network events flow
-	 * into our buffers. Requires VS Code 1.117+ where the browser CDP proxy
-	 * multiplexes sessions via `sessionId` envelopes. On older versions the
-	 * command may be silently ignored; we log and carry on.
+	 * Enable the browser CDP proxy's auto-attach so worker/iframe targets
+	 * registered by VS Code's browserViewGroup are attached automatically.
+	 * Sent at browser/root level (sessionId: null) — that sets the proxy's
+	 * internal `_autoAttach` flag. Per-session setAutoAttach wouldn't help
+	 * because child sessions created via CDP auto-attach bypass the proxy's
+	 * session map.
 	 */
 	private async enableAutoAttach(): Promise<void> {
 		try {
@@ -251,10 +349,10 @@ export class CDPConnection {
 				autoAttach: true,
 				waitForDebuggerOnStart: false,
 				flatten: true,
-			});
-			this.log.appendLine('[CDP] Auto-attach enabled (frames + workers)');
+			}, { sessionId: null });
+			this.log.appendLine('[CDP] Auto-attach enabled');
 		} catch (err) {
-			this.log.appendLine(`[CDP] setAutoAttach not supported (${err}); frames/workers will not be captured`);
+			this.log.appendLine(`[CDP] setAutoAttach not supported (${err}); child sessions will not be captured`);
 		}
 	}
 
@@ -305,6 +403,7 @@ export class CDPConnection {
 	}
 
 	private handleEvent(method: string, params: Record<string, unknown>, sessionId?: string): void {
+		this.eventCounts.set(method, (this.eventCounts.get(method) ?? 0) + 1);
 		switch (method) {
 			case 'Runtime.consoleAPICalled':
 				this.onConsole(params, sessionId);
@@ -328,6 +427,8 @@ export class CDPConnection {
 		const sessionId = params.sessionId as string | undefined;
 		const targetInfo = params.targetInfo as { type: string; url: string; targetId: string } | undefined;
 		if (!sessionId || !targetInfo) return;
+		// The primary page session is tracked separately; don't tag its events with `target`.
+		if (sessionId === this._pageSessionId) return;
 		this.childSessions.set(sessionId, {
 			type: targetInfo.type,
 			url: targetInfo.url,
@@ -405,10 +506,18 @@ export class CDPConnection {
 		}
 	}
 
+	/**
+	 * Send a CDP command. By default routes to the primary page session
+	 * (`_pageSessionId`). Pass `opts.sessionId` as:
+	 *   - a string: explicit session id (e.g. a worker/iframe child).
+	 *   - `null`: no sessionId in envelope; the proxy handles it at browser/root level
+	 *     (needed for Browser.* / Target.* commands during session bootstrap).
+	 *   - omitted / undefined: fall through to `_pageSessionId` if known.
+	 */
 	send(
 		method: string,
 		params?: Record<string, unknown>,
-		opts: { sessionId?: string; timeoutMs?: number } = {},
+		opts: { sessionId?: string | null; timeoutMs?: number } = {},
 	): Promise<unknown> {
 		const timeoutMs = opts.timeoutMs ?? 30000;
 		return new Promise((resolve, reject) => {
@@ -426,7 +535,8 @@ export class CDPConnection {
 				reject: (e) => { clearTimeout(timer); reject(e); },
 			});
 			const envelope: Record<string, unknown> = { id, method, params };
-			if (opts.sessionId) envelope.sessionId = opts.sessionId;
+			const sessionId = opts.sessionId === undefined ? this._pageSessionId : opts.sessionId;
+			if (sessionId) envelope.sessionId = sessionId;
 			this.ws.send(JSON.stringify(envelope));
 		});
 	}
@@ -458,6 +568,7 @@ export class CDPConnection {
 		}
 		this._session = null;
 		this._sessionId = null;
+		this._pageSessionId = null;
 		await this.removeTitlePrefix();
 		if (this.ws) {
 			this.ws.close();
