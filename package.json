@@ -2,7 +2,7 @@
   "name": "integrated-browser-mcp",
   "displayName": "Integrated Browser MCP",
   "description": "Exposes VS Code's integrated browser to external agents (Claude Code, scripts, curl) via a local HTTP API and MCP server.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "thimo",
   "license": "MIT",
   "author": {
@@ -35,6 +35,9 @@
     "AI",
     "Debuggers",
     "Other"
+  ],
+  "enabledApiProposals": [
+    "browser"
   ],
   "activationEvents": [
     "onStartupFinished"

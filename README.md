@@ -153,9 +153,28 @@ Stale instance files from crashed VS Code windows are cleaned up automatically o
 - **Browser Bridge: Stop** — Stop the bridge
 - **Browser Bridge: Show Status** — Show connection status
 
+## Enabling worker event capture (proposed API)
+
+By default the bridge launches the integrated browser via a VS Code debug session and talks to it through `vscode-js-debug`'s CDP proxy. That proxy only forwards events from the main page session — so logs and network requests from web workers and service workers never reach the `/console` and `/network` buffers.
+
+VS Code ships a **proposed API** (`vscode.window.openBrowserTab`) that bypasses `vscode-js-debug` entirely and gives direct multiplexed access to the CDP stream. On this path, worker and iframe events are captured and tagged with a `target` field.
+
+To enable it, launch VS Code with the proposed API flag:
+
+```bash
+code --enable-proposed-api=thimo.integrated-browser-mcp
+```
+
+The extension feature-detects the proposal at startup and uses it if available. Without the flag, the bridge falls back to the debug-session path and works exactly like before — so setting the flag is optional and safe.
+
+Check which path you're on via the status bar tooltip (`Browser MCP: Connected (proposed)` vs `(debug-session)`), or `GET /status` → `transport: "browserTab"` vs `"websocket"`.
+
+Caveat: the `browser` proposal is still [tracked upstream](https://github.com/microsoft/vscode/issues/300319) and its shape can change between VS Code releases. The fallback path keeps the extension usable regardless.
+
 ## Known limitations
 
-- The browser runs as a VS Code debug session (`noDebug` mode). This means the debug toolbar and a "(1)" badge on the Run & Debug icon appear when the browser is active. This is a VS Code limitation — CDP access requires a debug session.
+- On the debug-session path (without the proposed API flag): the browser runs as a VS Code debug session in `noDebug` mode. This means the debug toolbar and a "(1)" badge on the Run & Debug icon appear when the browser is active.
+- On the debug-session path: web worker and service worker events are not captured.
 - `/eval` executes arbitrary JavaScript in whatever page is open. Use with care.
 - The browser tab opens in the VS Code editor area. It can be moved to a side panel or closed (which disconnects CDP).
 

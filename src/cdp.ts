@@ -35,6 +35,9 @@ const NETWORK_BUFFER_SIZE = 200;
 
 export class CDPConnection {
 	private ws: WebSocket | null = null;
+	private browserTabSession: vscode.BrowserCDPSession | null = null;
+	private browserTab: vscode.BrowserTab | null = null;
+	private browserTabDisposables: vscode.Disposable[] = [];
 	private requestId = 0;
 	private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -47,6 +50,7 @@ export class CDPConnection {
 
 	private _sessionId: string | null = null;
 	private _session: vscode.DebugSession | null = null;
+	private _transport: 'websocket' | 'browserTab' | null = null;
 
 	/**
 	 * CDP session ID for the primary page target. From VS Code 1.117 on, the
@@ -55,6 +59,9 @@ export class CDPConnection {
 	 * unless an explicit `sessionId` override is passed.
 	 */
 	private _pageSessionId: string | null = null;
+
+	/** CDP session ID for the browser-level handshake session. */
+	private _browserSessionId: string | null = null;
 
 	private consoleBuffer: ConsoleEntry[] = [];
 	private networkBuffer: NetworkEntry[] = [];
@@ -97,6 +104,11 @@ export class CDPConnection {
 		return Object.fromEntries(this.eventCounts);
 	}
 
+	/** Diagnostic: which transport is active. */
+	get transport(): 'websocket' | 'browserTab' | null {
+		return this._transport;
+	}
+
 	get console(): ConsoleEntry[] {
 		return this.consoleBuffer;
 	}
@@ -119,6 +131,7 @@ export class CDPConnection {
 		this.log.appendLine(`[CDP] connectToSession called (session: ${session.name}, id: ${session.id})`);
 		this._session = session;
 		this._sessionId = session.id;
+		this._transport = 'websocket';
 		this.setState('connecting');
 
 		try {
@@ -130,6 +143,45 @@ export class CDPConnection {
 			this.log.appendLine(`[CDP] Failed to connect: ${err}`);
 			this.setState('disconnected');
 			this.scheduleReconnect();
+		}
+	}
+
+	/**
+	 * Connect via VS Code's proposed `browser` API (BrowserTab.startCDPSession).
+	 * This bypasses vscode-js-debug entirely, giving us direct access to the
+	 * multiplexed CDP stream. Events from all sessions (worker, iframe,
+	 * service_worker) flow without js-debug's sessionId-stripping subscribe
+	 * filter. Requires `--enable-proposed-api=thimo.integrated-browser-mcp`
+	 * when launching VS Code.
+	 */
+	async connectToBrowserTab(tab: vscode.BrowserTab): Promise<void> {
+		this.log.appendLine(`[CDP] connectToBrowserTab called (url: ${tab.url})`);
+		this.browserTab = tab;
+		this._transport = 'browserTab';
+		this.setState('connecting');
+
+		try {
+			const session = await tab.startCDPSession();
+			this.browserTabSession = session;
+			this.browserTabDisposables.push(
+				session.onDidReceiveMessage((msg: unknown) => {
+					this.handleMessage(msg as Record<string, unknown>);
+				}),
+				session.onDidClose(() => {
+					this.log.appendLine('[CDP] BrowserCDPSession closed');
+					this.browserTabSession = null;
+					this.pending.forEach(p => p.reject(new Error('Session closed')));
+					this.pending.clear();
+					if (!this.disposed) this.setState('disconnected');
+				}),
+			);
+			this.setState('connected');
+			this.log.appendLine('[CDP] BrowserCDPSession ready');
+			await this.establishPageSession();
+			await this.enableDomains();
+		} catch (err) {
+			this.log.appendLine(`[CDP] connectToBrowserTab failed: ${err}`);
+			this.setState('disconnected');
 		}
 	}
 
@@ -173,19 +225,7 @@ export class CDPConnection {
 			ws.on('message', (data) => {
 				try {
 					const msg = JSON.parse(data.toString());
-					if (msg.id !== undefined) {
-						const p = this.pending.get(msg.id);
-						if (p) {
-							this.pending.delete(msg.id);
-							if (msg.error) {
-								p.reject(new Error(msg.error.message));
-							} else {
-								p.resolve(msg.result);
-							}
-						}
-					} else if (msg.method) {
-						this.handleEvent(msg.method, msg.params, msg.sessionId);
-					}
+					this.handleMessage(msg);
 				} catch (err) {
 					this.log.appendLine(`[CDP] Message parse error: ${err}`);
 				}
@@ -215,11 +255,31 @@ export class CDPConnection {
 		});
 	}
 
+	private handleMessage(msg: Record<string, unknown>): void {
+		if (msg.id !== undefined) {
+			const p = this.pending.get(msg.id as number);
+			if (p) {
+				this.pending.delete(msg.id as number);
+				if (msg.error) {
+					p.reject(new Error((msg.error as { message: string }).message));
+				} else {
+					p.resolve(msg.result);
+				}
+			}
+		} else if (msg.method) {
+			this.handleEvent(
+				msg.method as string,
+				(msg.params ?? {}) as Record<string, unknown>,
+				msg.sessionId as string | undefined,
+			);
+		}
+	}
+
 	private titleScriptId: string | null = null;
 
 	private static readonly TITLE_SCRIPT = `
 		(function() {
-			var P = '\\u{1F534} ';
+			var P = '\\u{25C9} ';
 			var updating = false;
 
 			function ensurePrefix() {
@@ -296,6 +356,10 @@ export class CDPConnection {
 			this.log.appendLine('[CDP] attachToBrowserTarget returned no sessionId');
 			return;
 		}
+		this._browserSessionId = browserSessionId;
+		// Scrub the browser session from childSessions in case its attachedToTarget
+		// event raced ahead of this assignment.
+		this.childSessions.delete(browserSessionId);
 
 		try {
 			const targetsResult = await this.send('Target.getTargets', undefined, {
@@ -313,6 +377,8 @@ export class CDPConnection {
 			}, { sessionId: browserSessionId }) as { sessionId?: string };
 			if (attachResult.sessionId) {
 				this._pageSessionId = attachResult.sessionId;
+				// Same racing concern as the browser session above.
+				this.childSessions.delete(attachResult.sessionId);
 				this.log.appendLine(`[CDP] Attached to page session ${attachResult.sessionId} (${page.url ?? page.targetId})`);
 			} else {
 				this.log.appendLine('[CDP] Target.attachToTarget returned no sessionId');
@@ -387,7 +453,7 @@ export class CDPConnection {
 				await this.send('Runtime.evaluate', {
 					expression: `
 						(function() {
-							var P = '\\u{1F534} ';
+							var P = '\\u{25C9} ';
 							delete document.title;
 							var og = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
 							if (og && og.get.call(document).startsWith(P)) {
@@ -427,8 +493,8 @@ export class CDPConnection {
 		const sessionId = params.sessionId as string | undefined;
 		const targetInfo = params.targetInfo as { type: string; url: string; targetId: string } | undefined;
 		if (!sessionId || !targetInfo) return;
-		// The primary page session is tracked separately; don't tag its events with `target`.
-		if (sessionId === this._pageSessionId) return;
+		// Skip our own handshake sessions — they aren't children to tag.
+		if (sessionId === this._pageSessionId || sessionId === this._browserSessionId) return;
 		this.childSessions.set(sessionId, {
 			type: targetInfo.type,
 			url: targetInfo.url,
@@ -521,7 +587,9 @@ export class CDPConnection {
 	): Promise<unknown> {
 		const timeoutMs = opts.timeoutMs ?? 30000;
 		return new Promise((resolve, reject) => {
-			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+			const wsOpen = this.ws && this.ws.readyState === WebSocket.OPEN;
+			const tabOpen = this.browserTabSession !== null;
+			if (!wsOpen && !tabOpen) {
 				reject(new Error('CDP not connected'));
 				return;
 			}
@@ -537,7 +605,15 @@ export class CDPConnection {
 			const envelope: Record<string, unknown> = { id, method, params };
 			const sessionId = opts.sessionId === undefined ? this._pageSessionId : opts.sessionId;
 			if (sessionId) envelope.sessionId = sessionId;
-			this.ws.send(JSON.stringify(envelope));
+			if (this.browserTabSession) {
+				this.browserTabSession.sendMessage(envelope).then(undefined, (err: Error) => {
+					this.pending.delete(id);
+					clearTimeout(timer);
+					reject(err);
+				});
+			} else {
+				this.ws!.send(JSON.stringify(envelope));
+			}
 		});
 	}
 
@@ -569,11 +645,20 @@ export class CDPConnection {
 		this._session = null;
 		this._sessionId = null;
 		this._pageSessionId = null;
+		this._browserSessionId = null;
+		this._transport = null;
 		await this.removeTitlePrefix();
 		if (this.ws) {
 			this.ws.close();
 			this.ws = null;
 		}
+		this.browserTabDisposables.forEach(d => d.dispose());
+		this.browserTabDisposables = [];
+		if (this.browserTabSession) {
+			try { await this.browserTabSession.close(); } catch { /* best effort */ }
+			this.browserTabSession = null;
+		}
+		this.browserTab = null;
 		this.pending.forEach(p => p.reject(new Error('Disconnected')));
 		this.pending.clear();
 		this.childSessions.clear();

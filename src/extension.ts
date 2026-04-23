@@ -92,7 +92,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 
 		// 1. CDP connection
 		cdp = new CDPConnection(log);
-		cdp.onStateChange(state => statusBar.update(state, running));
+		cdp.onStateChange(state => statusBar.update(state, running, cdp.transport));
 
 		// 2. HTTP server (with lazy browser launch callback)
 		httpServer = new BridgeServer(cdp, log);
@@ -100,7 +100,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		const port = await httpServer.start(preferredPort);
 		actualPort = port;
 		running = true;
-		statusBar.update(cdp.state, true);
+		statusBar.update(cdp.state, true, cdp.transport);
 
 		// 3. If a browser session already exists, connect to it (don't launch a new one)
 		const existingSession = vscode.debug.activeDebugSession && isBrowserSession(vscode.debug.activeDebugSession)
@@ -175,7 +175,35 @@ async function stopBridge(): Promise<void> {
 	log?.appendLine('[Bridge] Stopped');
 }
 
+function hasProposedBrowserApi(): boolean {
+	// The `browser` proposed API adds `openBrowserTab` on vscode.window.
+	// Absent unless VS Code was launched with --enable-proposed-api=thimo.integrated-browser-mcp.
+	return typeof (vscode.window as unknown as { openBrowserTab?: unknown }).openBrowserTab === 'function';
+}
+
+async function launchBrowserViaProposedApi(): Promise<boolean> {
+	try {
+		log.appendLine('[Bridge] Launching via proposed browser API (openBrowserTab)');
+		const tab = await vscode.window.openBrowserTab('about:blank');
+		await cdp.connectToBrowserTab(tab);
+		return true;
+	} catch (err) {
+		log.appendLine(`[Bridge] Proposed API launch failed: ${err}`);
+		return false;
+	}
+}
+
 async function launchBrowser(): Promise<void> {
+	// Prefer VS Code's proposed `browser` API when available — it bypasses
+	// vscode-js-debug entirely, eliminating the event-forwarding limitations
+	// that prevent worker/service-worker events from reaching us.
+	if (hasProposedBrowserApi()) {
+		const ok = await launchBrowserViaProposedApi();
+		if (ok) return;
+		log.appendLine('[Bridge] Falling back to debug-session launch');
+	}
+
+	// Fallback: launch an editor-browser debug session and bridge via requestCDPProxy.
 	// vscode-js-debug creates a root session (the launcher) and a child session
 	// for each page target. requestCDPProxy only works on the child session
 	// which has the actual CDP connection.

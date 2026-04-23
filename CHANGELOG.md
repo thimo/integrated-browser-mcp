@@ -5,6 +5,21 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-23
+
+### Added
+- Optional support for VS Code's proposed `browser` API ([microsoft/vscode#300319](https://github.com/microsoft/vscode/issues/300319)). When the extension is launched with `--enable-proposed-api=thimo.integrated-browser-mcp`, the bridge uses `vscode.window.openBrowserTab` + `BrowserTab.startCDPSession` instead of a debug session, bypassing `vscode-js-debug`'s CDP proxy. This makes web worker and service worker events (console + network) flow into `/console` and `/network`, tagged with `target: "worker"` / `"service_worker"`. No debug toolbar or Run & Debug badge in this mode.
+- Feature-detects the proposal at startup. Without the flag, the bridge falls back to the existing debug-session path and works exactly like 0.2.0.
+- `/status` exposes `transport`: `"browserTab"` when using the proposed API, `"websocket"` on the fallback path, `null` when idle.
+- Status bar tooltip shows the active transport (`Browser MCP: Connected (proposed)` vs `(debug-session)`).
+
+### Changed
+- Status bar no longer shows the warning background on first startup when the bridge is simply idle (no browser requested yet). The warning style is reserved for unexpected disconnects after a connection was established.
+- Tab-title marker changed from `🔴 ` (emoji-sized red dot) to `◉ ` (text-sized fisheye).
+
+### Fixed
+- Handshake-only CDP sessions (browser + primary page) are no longer reported as child sessions in `/status.children`, and their events no longer get a `target` field. Only true child sessions (workers, iframes) are tagged.
+
 ## [0.2.0] — 2026-04-23
 
 ### Fixed

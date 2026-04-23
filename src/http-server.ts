@@ -52,6 +52,7 @@ export class BridgeServer {
 				data: {
 					cdp: this.cdp.state,
 					server: true,
+					transport: this.cdp.transport,
 					pageSessionId: this.cdp.pageSessionId,
 					children: this.cdp.children,
 					consoleBufferSize: this.cdp.console.length,
