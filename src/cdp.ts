@@ -7,6 +7,8 @@ export interface ConsoleEntry {
 	type: string;
 	text: string;
 	timestamp: number;
+	/** Target type for entries originating in a child session (worker, iframe, service_worker). Absent for top-level page logs. */
+	target?: string;
 }
 
 export interface NetworkEntry {
@@ -18,6 +20,14 @@ export interface NetworkEntry {
 	type?: string;
 	timestamp: number;
 	responseTimestamp?: number;
+	/** Target type for entries originating in a child session (worker, iframe, service_worker). Absent for top-level requests. */
+	target?: string;
+}
+
+interface ChildTargetInfo {
+	type: string;
+	url: string;
+	targetId: string;
 }
 
 const CONSOLE_BUFFER_SIZE = 200;
@@ -41,6 +51,7 @@ export class CDPConnection {
 	private consoleBuffer: ConsoleEntry[] = [];
 	private networkBuffer: NetworkEntry[] = [];
 	private networkMap = new Map<string, NetworkEntry>();
+	private childSessions = new Map<string, ChildTargetInfo>();
 
 	private log: vscode.OutputChannel;
 	private disposed = false;
@@ -143,7 +154,7 @@ export class CDPConnection {
 							}
 						}
 					} else if (msg.method) {
-						this.handleEvent(msg.method, msg.params);
+						this.handleEvent(msg.method, msg.params, msg.sessionId);
 					}
 				} catch (err) {
 					this.log.appendLine(`[CDP] Message parse error: ${err}`);
@@ -225,6 +236,26 @@ export class CDPConnection {
 		]);
 		this.log.appendLine('[CDP] Domains enabled');
 		await this.installTitlePrefix();
+		await this.enableAutoAttach();
+	}
+
+	/**
+	 * Subscribe to iframe/worker targets so their Runtime/Network events flow
+	 * into our buffers. Requires VS Code 1.117+ where the browser CDP proxy
+	 * multiplexes sessions via `sessionId` envelopes. On older versions the
+	 * command may be silently ignored; we log and carry on.
+	 */
+	private async enableAutoAttach(): Promise<void> {
+		try {
+			await this.send('Target.setAutoAttach', {
+				autoAttach: true,
+				waitForDebuggerOnStart: false,
+				flatten: true,
+			});
+			this.log.appendLine('[CDP] Auto-attach enabled (frames + workers)');
+		} catch (err) {
+			this.log.appendLine(`[CDP] setAutoAttach not supported (${err}); frames/workers will not be captured`);
+		}
 	}
 
 	private async installTitlePrefix(): Promise<void> {
@@ -266,28 +297,66 @@ export class CDPConnection {
 							}
 						})();
 					`,
-				}, 2000);
+				}, { timeoutMs: 2000 });
 			}
 		} catch {
 			// Best-effort cleanup
 		}
 	}
 
-	private handleEvent(method: string, params: Record<string, unknown>): void {
+	private handleEvent(method: string, params: Record<string, unknown>, sessionId?: string): void {
 		switch (method) {
 			case 'Runtime.consoleAPICalled':
-				this.onConsole(params);
+				this.onConsole(params, sessionId);
 				break;
 			case 'Network.requestWillBeSent':
-				this.onNetworkRequest(params);
+				this.onNetworkRequest(params, sessionId);
 				break;
 			case 'Network.responseReceived':
 				this.onNetworkResponse(params);
 				break;
+			case 'Target.attachedToTarget':
+				this.onTargetAttached(params);
+				break;
+			case 'Target.detachedFromTarget':
+				this.onTargetDetached(params);
+				break;
 		}
 	}
 
-	private onConsole(params: Record<string, unknown>): void {
+	private onTargetAttached(params: Record<string, unknown>): void {
+		const sessionId = params.sessionId as string | undefined;
+		const targetInfo = params.targetInfo as { type: string; url: string; targetId: string } | undefined;
+		if (!sessionId || !targetInfo) return;
+		this.childSessions.set(sessionId, {
+			type: targetInfo.type,
+			url: targetInfo.url,
+			targetId: targetInfo.targetId,
+		});
+		this.log.appendLine(`[CDP] Child session attached: ${targetInfo.type} (${targetInfo.url || targetInfo.targetId})`);
+		// Enable Runtime + Network on the child so its events flow through.
+		// Browser-level targets can't enable Network; skip those.
+		this.send('Runtime.enable', undefined, { sessionId }).catch(err => {
+			this.log.appendLine(`[CDP] Runtime.enable failed for ${targetInfo.type}: ${err}`);
+		});
+		if (targetInfo.type !== 'browser') {
+			this.send('Network.enable', undefined, { sessionId }).catch(err => {
+				this.log.appendLine(`[CDP] Network.enable failed for ${targetInfo.type}: ${err}`);
+			});
+		}
+	}
+
+	private onTargetDetached(params: Record<string, unknown>): void {
+		const sessionId = params.sessionId as string | undefined;
+		if (!sessionId) return;
+		const info = this.childSessions.get(sessionId);
+		if (info) {
+			this.log.appendLine(`[CDP] Child session detached: ${info.type}`);
+			this.childSessions.delete(sessionId);
+		}
+	}
+
+	private onConsole(params: Record<string, unknown>, sessionId?: string): void {
 		const args = params.args as Array<{ type: string; value?: unknown; description?: string }> | undefined;
 		const text = args
 			? args.map(a => a.value !== undefined ? String(a.value) : a.description ?? '').join(' ')
@@ -297,13 +366,15 @@ export class CDPConnection {
 			text,
 			timestamp: Date.now(),
 		};
+		const target = sessionId ? this.childSessions.get(sessionId)?.type : undefined;
+		if (target) entry.target = target;
 		this.consoleBuffer.push(entry);
 		if (this.consoleBuffer.length > CONSOLE_BUFFER_SIZE) {
 			this.consoleBuffer.shift();
 		}
 	}
 
-	private onNetworkRequest(params: Record<string, unknown>): void {
+	private onNetworkRequest(params: Record<string, unknown>, sessionId?: string): void {
 		const request = params.request as { method: string; url: string } | undefined;
 		if (!request) return;
 		const entry: NetworkEntry = {
@@ -313,6 +384,8 @@ export class CDPConnection {
 			type: params.type as string | undefined,
 			timestamp: Date.now(),
 		};
+		const target = sessionId ? this.childSessions.get(sessionId)?.type : undefined;
+		if (target) entry.target = target;
 		this.networkMap.set(entry.requestId, entry);
 		this.networkBuffer.push(entry);
 		if (this.networkBuffer.length > NETWORK_BUFFER_SIZE) {
@@ -332,7 +405,12 @@ export class CDPConnection {
 		}
 	}
 
-	send(method: string, params?: Record<string, unknown>, timeoutMs = 30000): Promise<unknown> {
+	send(
+		method: string,
+		params?: Record<string, unknown>,
+		opts: { sessionId?: string; timeoutMs?: number } = {},
+	): Promise<unknown> {
+		const timeoutMs = opts.timeoutMs ?? 30000;
 		return new Promise((resolve, reject) => {
 			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error('CDP not connected'));
@@ -347,7 +425,9 @@ export class CDPConnection {
 				resolve: (v) => { clearTimeout(timer); resolve(v); },
 				reject: (e) => { clearTimeout(timer); reject(e); },
 			});
-			this.ws.send(JSON.stringify({ id, method, params }));
+			const envelope: Record<string, unknown> = { id, method, params };
+			if (opts.sessionId) envelope.sessionId = opts.sessionId;
+			this.ws.send(JSON.stringify(envelope));
 		});
 	}
 
@@ -385,6 +465,7 @@ export class CDPConnection {
 		}
 		this.pending.forEach(p => p.reject(new Error('Disconnected')));
 		this.pending.clear();
+		this.childSessions.clear();
 		this.setState('disconnected');
 	}
 

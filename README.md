@@ -17,6 +17,8 @@ MCP Server  ──HTTP──▶  VS Code Extension  ──CDP──▶  Integrat
 
 The extension uses VS Code's built-in `editor-browser` and the Chrome DevTools Protocol (CDP) to provide full browser automation: navigation, JavaScript evaluation, clicking, typing, screenshots, DOM access, console and network monitoring.
 
+On VS Code 1.117+, console and network events from iframes, web workers, and service workers are also captured, tagged with a `target` field in `/console` and `/network` entries.
+
 ## Getting started
 
 1. Install the extension

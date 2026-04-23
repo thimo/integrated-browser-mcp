@@ -4,7 +4,7 @@ A VS Code extension that exposes VS Code's **integrated browser** to external ag
 
 ## Why this exists
 
-VS Code 1.110+ ships with a built-in integrated browser (Chromium, full DevTools). Microsoft added browser tools for agents, but locked them to GitHub Copilot only. Claude Code and other external agents have no way to control this browser.
+VS Code 1.112+ ships with a stable `editor-browser` debug type backed by a built-in integrated browser (Chromium, full DevTools). Microsoft added browser tools for agents, but locked them to GitHub Copilot only. Claude Code and other external agents have no way to control this browser.
 
 Every existing solution (Browser MCP, Playwright MCP, chrome-devtools-mcp) targets an **external** Chrome process. This extension is different: it bridges the browser **already open in VS Code** — with your session cookies, your localhost dev server, your DevTools — to any agent that can speak HTTP or MCP.
 
@@ -41,7 +41,9 @@ const session = vscode.debug.activeDebugSession; // type === 'editor-browser'
 const { host, port } = await session.customRequest('requestCDPProxy');
 // ws://host:port → full Chrome DevTools Protocol access
 ```
-This was merged in vscode-js-debug PR #964. It gives raw WebSocket CDP — navigate, eval, screenshot, click, DOM, network interception, everything.
+The `editor-browser` debug type became first-class in VS Code 1.112 (vscode-js-debug PR #2329). It gives raw WebSocket CDP — navigate, eval, screenshot, click, DOM, network interception, everything.
+
+On VS Code 1.117+ (vscode PR #311049), the CDP proxy multiplexes sessions for iframes / web workers / service workers via `Target.setAutoAttach({ flatten: true })`. Messages carry a top-level `sessionId` field; our `CDPConnection.send()` accepts an optional `sessionId` to route commands to specific targets.
 
 ### Auto-attach flow
 The extension must:
