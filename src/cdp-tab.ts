@@ -362,22 +362,25 @@ export class CDPTab {
 				if (updating || gaveUp) return;
 				var el = document.querySelector('title');
 				if (!el) {
-					var host = document.head || document.documentElement;
-					if (!host) return;
+					// Don't fabricate a <title> on \`documentElement\` — the HTML
+					// parser later adds the real one inside <head>, giving us
+					// two titles, and \`document.title\` reads the head one, so
+					// ours has no visible effect. Only fabricate if we're past
+					// DOMContentLoaded AND <head> exists (pages without a
+					// native <title>, like about:blank); otherwise wait — the
+					// MutationObserver fires when the parser creates the real
+					// title element.
+					if (document.readyState === 'loading') return;
+					if (!document.head) return;
 					el = document.createElement('title');
 					updating = true;
-					host.appendChild(el);
+					document.head.appendChild(el);
 					updating = false;
 				}
 				var stripped = el.textContent.replace(STRIP, '');
 				var want = P + stripped;
 				if (el.textContent === want) return;
 
-				var now = Date.now();
-				if (now - fightWindowStart > FIGHT_WINDOW_MS) {
-					fightCount = 0;
-					fightWindowStart = now;
-				}
 				fightCount++;
 				if (fightCount > FIGHT_THRESHOLD) {
 					gaveUp = true;
