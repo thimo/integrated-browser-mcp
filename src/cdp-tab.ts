@@ -350,14 +350,13 @@ export class CDPTab {
 
 			// Back-off against stale observers from older extension versions
 			// (e.g. a 0.3.0 MutationObserver still alive in the page JS context
-			// from before the extension was upgraded). If we set the title
-			// more than 10 times within a second, someone else is undoing our
-			// writes — give up so we don't burn CPU in a title-war.
+			// from before the extension was upgraded). Count every write: if we
+			// have to re-apply our prefix more than a few times in total (not
+			// per-second), something else is undoing it and we should stop.
+			// A legitimate SPA title change wouldn't cause repeated rewrites.
 			var fightCount = 0;
-			var fightWindowStart = 0;
 			var gaveUp = false;
-			var FIGHT_THRESHOLD = 10;
-			var FIGHT_WINDOW_MS = 1000;
+			var FIGHT_THRESHOLD = 5;
 
 			function ensurePrefix() {
 				if (updating || gaveUp) return;
