@@ -19,11 +19,14 @@ function generateTabId(): string {
 	return 'tab-' + crypto.randomBytes(4).toString('hex');
 }
 
-/** 1..20 → ①..⑳, else 🤯 overflow marker. Always suffixed with a space. */
+/**
+ * `(N) ` parenthesised decimal prefix. ASCII, high contrast, legible at any
+ * tab width, no upper cap. Matches the status bar's `Browser MCP (N)` count
+ * notation. Replaces earlier Unicode circled-digit approaches (outlined
+ * ①..⑳, negative ❶..⓴) which rendered too small in VS Code's tab strip.
+ */
 function numberToPrefix(n: number): string {
-	const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
-	if (n >= 1 && n <= 20) return CIRCLED[n - 1] + ' ';
-	return '🤯 ';
+	return `(${n}) `;
 }
 
 /**

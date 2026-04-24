@@ -324,13 +324,18 @@ export class CDPTab {
 	 */
 	private buildTitleScript(prefix: string): string {
 		const prefixJson = JSON.stringify(prefix);
-		// Any of our known markers that a previous install (or a stale script
-		// left behind by an earlier extension version) may have stacked onto
-		// the title. The `+` makes this greedy: `◉ ① ② Site` strips back to
-		// `Site` in one shot, preventing oscillation with a rival script that
-		// keeps prepending its own marker. Keep the character set in sync with
-		// `numberToPrefix`.
-		const STRIP_RE = '/^(?:(?:[\\u{2460}-\\u{2473}\\u{25C9}]|\\u{1F92F}) )+/u';
+		// Known bridge markers across extension versions:
+		//   - `(N) ` — current parenthesised decimal (0.4.0+)
+		//   - `[N] ` — interim bracketed decimal (short-lived)
+		//   - ①..⑳ (U+2460-2473) — outlined circled, pre-0.4.0 numbered
+		//   - ❶..❿ (U+2776-277F) — negative circled 1-10 (interim)
+		//   - ⓫..⓴ (U+24EB-24F4) — negative circled 11-20 (interim)
+		//   - ◉ (U+25C9) — 0.3.0 fisheye
+		//   - 🤯 (U+1F92F) — legacy overflow
+		// The `+` after the alternation group makes the strip greedy:
+		// `(1) ① ❷ Site` collapses to `Site` in one pass, preventing
+		// oscillation with rival scripts left behind by older versions.
+		const STRIP_RE = '/^(?:(?:\\(\\d+\\)|\\[\\d+\\]|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}]|\\u{1F92F}) )+/u';
 		return `(function(){
 			var P = ${prefixJson};
 			var STRIP = ${STRIP_RE};
@@ -548,7 +553,7 @@ export class CDPTab {
 					window.__bridgeTabPrefix = '';
 					var el = document.querySelector('title');
 					if (el) {
-						el.textContent = el.textContent.replace(/^(?:[\\u{2460}-\\u{2473}\\u{25C9}]|\\u{1F92F}) /u, '');
+						el.textContent = el.textContent.replace(/^(?:(?:\\(\\d+\\)|\\[\\d+\\]|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}]|\\u{1F92F}) )+/u, '');
 					}
 				})();`,
 			}, { timeoutMs: 2000 });
