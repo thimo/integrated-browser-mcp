@@ -45,7 +45,10 @@ export class StatusBar {
 			this.item.text = '$(warning) Browser MCP';
 			this.item.tooltip = `Browser MCP: Disconnected${tabLine}`;
 			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-			this.item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+			// `statusBarItem.warningForeground` resolves to a dark colour on
+			// some themes, yielding black-on-brown. Hardcode white for
+			// reliable contrast on both light and dark themes.
+			this.item.color = '#ffffff';
 		} else {
 			// Idle: bridge is up, no tabs open. Not an error state.
 			this.item.text = '$(circle-outline) Browser MCP';

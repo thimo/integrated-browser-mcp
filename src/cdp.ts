@@ -45,7 +45,6 @@ export class CDPManager {
 	private log: vscode.OutputChannel;
 	private _onStateChange = new vscode.EventEmitter<CDPState>();
 	readonly onStateChange = this._onStateChange.event;
-	private _lastEmittedState: CDPState = 'disconnected';
 
 	/**
 	 * Unique-per-process id used to mark BrowserTabs we own. VS Code's
@@ -187,6 +186,11 @@ export class CDPManager {
 				this.tabSubscriptions.get(tab.tabId)?.dispose();
 				this.tabSubscriptions.delete(tab.tabId);
 				this.tabs.delete(tab.tabId);
+				// Tab went into the map briefly (the tab.onStateChange listener
+				// that fires from disconnect() sees the tab before we delete it,
+				// so manager.state reports "tabs exist but disconnected" →
+				// warning). Re-emit now that the tab is truly gone.
+				this.emitStateChange();
 				throw new Error(`tab owned by ${owner}`);
 			}
 
@@ -225,11 +229,11 @@ export class CDPManager {
 	}
 
 	private emitStateChange(): void {
-		const current = this.state;
-		if (current !== this._lastEmittedState) {
-			this._lastEmittedState = current;
-			this._onStateChange.fire(current);
-		}
+		// Always fire — status-bar rendering depends on both state AND tab
+		// count; tab count can change without state changing (e.g. dropping
+		// a never-connected tab after an ownership conflict), and the bar
+		// needs to re-render to switch out of warning.
+		this._onStateChange.fire(this.state);
 	}
 
 	async closeTab(tabId: string): Promise<void> {
