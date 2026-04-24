@@ -48,28 +48,33 @@ For browser automation, use the integrated-browser-mcp MCP tools (browser_naviga
 
 ### Briefing an AI agent
 
-The MCP server already ships with a top-level `instructions` field that explains how to use it. Most agents read this automatically on connect. If you want to reinforce or extend it, copy the block below into your project's `CLAUDE.md`:
+The MCP server ships a top-level `instructions` field on connect. Clients that honour it (per the MCP spec) surface it to the model automatically. Claude Code's routing classifier sometimes decides on a shell command (like `open <URL>`) before consulting the MCP instructions, so a parallel hint in your project `CLAUDE.md` is the reliable belt-and-braces. Paste the block below:
 
 ```
-The integrated-browser-mcp controls a browser visible inside VS Code's
-editor area — not a separate Chrome window. The user can see exactly what
-you see.
+# Browser automation — integrated-browser-mcp
 
-Tabs are numbered: the "(N) " prefix in each tab title corresponds to the
-`number` field returned by browser_tab_list. When the user says "reload
-browser 2" or "open that in tab 3", match by number.
+When the user says "open <URL>", "visit <URL>", "navigate to <URL>",
+"show me <URL>", or anything similar, ALWAYS use the integrated-browser-mcp
+tools — never shell out to `open`, `xdg-open`, `start`, or any other
+system-browser launcher. The user expects the page inside their VS Code
+editor, not in a separate Chrome window.
 
-Choose the cheapest tool for the job:
-- browser_eval with a small JS expression for specific data (title, text,
-  form state, computed values). Fastest.
-- browser_snapshot for page structure (accessibility tree). Light.
-- browser_dom only when full HTML is genuinely needed. Heavy.
-- browser_screenshot only when visual verification actually matters.
-- browser_console / browser_network are already buffered — read with an
-  optional tabId to filter.
+- Opening a URL → browser_navigate (or browser_tab_open to keep the
+  current page in a side tab).
+- Reading data from the page → browser_eval with a small JS expression.
+  Prefer this over browser_dom (heavy) or browser_screenshot (heaviest).
+- Clicking / typing → browser_click / browser_type.
+- Understanding page structure → browser_snapshot (accessibility tree).
+- Recent logs or requests → browser_console / browser_network. Already
+  buffered; filter by tabId.
 
-browser_navigate replaces the current page. Use browser_tab_open to keep
-the old one.
+Tabs are numbered: the "(N) " prefix in each tab title matches the
+`number` field in browser_tab_list. When the user says "reload browser 2"
+or "tab 3", match by number.
+
+Do NOT use screenshot-based browser tools from other MCPs (claude-in-chrome,
+playwright, etc.) when integrated-browser-mcp is available — the user
+specifically wants their VS Code browser.
 ```
 
 ### Usage with curl
