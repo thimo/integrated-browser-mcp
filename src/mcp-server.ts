@@ -120,9 +120,30 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 	return { content: [{ type: 'text' as const, text }] };
 }
 
+const SERVER_INSTRUCTIONS = `
+This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
+
+Each tab has a stable number shown as a \`(N) \` prefix in the tab title (e.g. "(1) Pottagold", "(2) Profit and loss"). \`browser_tab_list\` returns the same number in its \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number.
+
+Target a specific tab by passing \`tabId\` (from \`browser_tab_list\` or \`browser_tab_open\`) to any interaction tool. Omit \`tabId\` to use the active tab.
+
+Pick the cheapest tool for the job:
+- \`browser_eval\` with a small JS expression is the fastest way to read specific data (title, element text, form state, URL, computed values). Prefer this over dumping the whole DOM.
+- \`browser_snapshot\` returns the accessibility tree — good for understanding page structure before clicking or typing.
+- \`browser_dom\` returns the full outer HTML. Heavy; use only when you truly need the complete markup.
+- \`browser_screenshot\` captures the page visually. Use only when visual verification actually matters — text-based tools are usually sufficient and much faster.
+- \`browser_console\` and \`browser_network\` are already buffered; pass \`tabId\` to filter to one tab. Each entry is timestamped and tagged with a \`target\` field when it originates from a web worker or iframe session.
+
+\`browser_navigate\` replaces the current page of the target tab. If you want the previous page to stay accessible, use \`browser_tab_open\` instead.
+
+The bridge lazy-launches the browser on the first interaction, so the very first call in a session can take a second longer than subsequent ones. That's expected.
+`.trim();
+
 const server = new McpServer({
 	name: 'integrated-browser-mcp',
-	version: '0.0.1',
+	version: '0.4.1',
+}, {
+	instructions: SERVER_INSTRUCTIONS,
 });
 
 const tabIdDescription = 'Optional browser tab id (e.g. "tab-ab12cd"). Omit to use the active tab. Use browser_tab_list to see tab ids.';
@@ -130,7 +151,7 @@ const tabIdDescription = 'Optional browser tab id (e.g. "tab-ab12cd"). Omit to u
 // Navigate
 server.tool(
 	'browser_navigate',
-	'Navigate the browser to a URL. Replaces the current page of the target tab.',
+	'Navigate the target tab to a URL. Replaces the current page (the previous page is gone — use browser_tab_open to keep it).',
 	{
 		url: z.string().describe('The URL to navigate to'),
 		tabId: z.string().optional().describe(tabIdDescription),
@@ -141,9 +162,9 @@ server.tool(
 // Eval
 server.tool(
 	'browser_eval',
-	'Execute JavaScript in the browser page. WARNING: runs arbitrary code in whatever page is open.',
+	'Run a JS expression in the page and return its value. Fastest way to read specific data (title, element text, form values, etc.). Prefer this over browser_dom or browser_screenshot for most read tasks. WARNING: runs arbitrary code — do not pass untrusted input.',
 	{
-		expression: z.string().describe('JavaScript expression to evaluate'),
+		expression: z.string().describe('JavaScript expression to evaluate. Keep it small; return structured data for the AI to consume.'),
 		tabId: z.string().optional().describe(tabIdDescription),
 	},
 	async ({ expression, tabId }) => toMcpResult(await bridgePost('/eval', { expression, tabId })),
@@ -188,7 +209,7 @@ server.tool(
 // Screenshot
 server.tool(
 	'browser_screenshot',
-	'Take a screenshot of the current page (returns base64 PNG)',
+	'Capture the page as a PNG (returned as an image). Heavy — use only when visual verification matters. For reading data, browser_eval or browser_snapshot is faster.',
 	{ tabId: z.string().optional().describe(tabIdDescription) },
 	async ({ tabId }) => {
 		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
@@ -209,7 +230,7 @@ server.tool(
 // Snapshot (accessibility tree)
 server.tool(
 	'browser_snapshot',
-	'Get the accessibility tree of the current page (useful for understanding page structure)',
+	'Return the accessibility tree of the page. Good for understanding page structure before clicking or typing. Lighter than browser_dom.',
 	{ tabId: z.string().optional().describe(tabIdDescription) },
 	async ({ tabId }) => {
 		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
@@ -220,7 +241,7 @@ server.tool(
 // DOM
 server.tool(
 	'browser_dom',
-	'Get the full outer HTML of the current page',
+	'Return the full outer HTML of the page. Heavy — only use when you truly need complete markup. For reading specific data, browser_eval is much faster.',
 	{ tabId: z.string().optional().describe(tabIdDescription) },
 	async ({ tabId }) => {
 		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
@@ -231,7 +252,7 @@ server.tool(
 // Console
 server.tool(
 	'browser_console',
-	'Read buffered console output from the browser. Without tabId, aggregates entries across all tabs (each entry includes its originating tabId).',
+	'Read recent console output (last 200 per tab). Each entry has type, text, timestamp, tabId, and optional target (worker/iframe/service_worker). Omit tabId to aggregate across all tabs.',
 	{
 		limit: z.number().int().min(1).max(200).default(50).describe('Max entries to return'),
 		tabId: z.string().optional().describe('Filter to one tab. Omit to aggregate across all tabs.'),
@@ -246,7 +267,7 @@ server.tool(
 // Network
 server.tool(
 	'browser_network',
-	'Read buffered network requests from the browser. Without tabId, aggregates across all tabs.',
+	'Read recent network requests (last 200 per tab). Each entry has requestId, method, url, status, type, timestamps, tabId, and optional target. Useful for diagnosing failed API calls or missing resources. Omit tabId to aggregate.',
 	{
 		limit: z.number().int().min(1).max(200).default(50).describe('Max entries to return'),
 		filter: z.string().optional().describe('Filter URLs containing this string'),
@@ -296,7 +317,7 @@ server.tool(
 
 server.tool(
 	'browser_tab_open',
-	'Open a new browser tab. Requires VS Code to be launched with --enable-proposed-api=thimo.integrated-browser-mcp; otherwise returns an error. Returns the new tabId.',
+	'Open a new browser tab at the given URL. Returns { tabId, url, title } — the tabId is the handle for subsequent tool calls. Use this when you want to keep the current page while opening another. Requires VS Code launched with --enable-proposed-api=thimo.integrated-browser-mcp.',
 	{
 		url: z.string().describe('Initial URL for the new tab'),
 		makeActive: z.boolean().optional().default(true).describe('Make this tab the active (default) target for subsequent tool calls'),
@@ -306,21 +327,21 @@ server.tool(
 
 server.tool(
 	'browser_tab_close',
-	'Close a browser tab by id.',
+	'Close a tab by id. The tab disappears from the VS Code UI.',
 	{ tabId: z.string().describe('Tab id from browser_tab_list / browser_tab_open') },
 	async ({ tabId }) => toMcpResult(await bridgePost(`/tab/close/${encodeURIComponent(tabId)}`, {})),
 );
 
 server.tool(
 	'browser_tab_list',
-	'List all open browser tabs under the bridge, with id/url/title and which is active.',
+	'List every tab under the bridge. Returns an array of { tabId, number, url, title, active, state, transport }. The `number` matches the "(N) " prefix shown in each tab title — if the user says "reload browser 2", find the entry with number=2 and use its tabId.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/tabs')),
 );
 
 server.tool(
 	'browser_tab_activate',
-	'Set the default target tab for subsequent tool calls that omit tabId. Note: does not move focus in the VS Code UI (not exposed by the proposed API).',
+	'Set which tab receives tool calls that omit tabId. Note: does not move focus in the VS Code UI (the proposed API does not expose that).',
 	{ tabId: z.string().describe('Tab id to activate') },
 	async ({ tabId }) => toMcpResult(await bridgePost(`/tab/activate/${encodeURIComponent(tabId)}`, {})),
 );

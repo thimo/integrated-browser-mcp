@@ -46,6 +46,32 @@ To avoid Claude Code picking the wrong browser tool, add this to your project's 
 For browser automation, use the integrated-browser-mcp MCP tools (browser_navigate, browser_screenshot, etc.), not the claude-in-chrome tools.
 ```
 
+### Briefing an AI agent
+
+The MCP server already ships with a top-level `instructions` field that explains how to use it. Most agents read this automatically on connect. If you want to reinforce or extend it, copy the block below into your project's `CLAUDE.md`:
+
+```
+The integrated-browser-mcp controls a browser visible inside VS Code's
+editor area — not a separate Chrome window. The user can see exactly what
+you see.
+
+Tabs are numbered: the "(N) " prefix in each tab title corresponds to the
+`number` field returned by browser_tab_list. When the user says "reload
+browser 2" or "open that in tab 3", match by number.
+
+Choose the cheapest tool for the job:
+- browser_eval with a small JS expression for specific data (title, text,
+  form state, computed values). Fastest.
+- browser_snapshot for page structure (accessibility tree). Light.
+- browser_dom only when full HTML is genuinely needed. Heavy.
+- browser_screenshot only when visual verification actually matters.
+- browser_console / browser_network are already buffered — read with an
+  optional tabId to filter.
+
+browser_navigate replaces the current page. Use browser_tab_open to keep
+the old one.
+```
+
 ### Usage with curl
 
 ```bash
