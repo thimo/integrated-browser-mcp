@@ -61,22 +61,19 @@ function discoverPort(): number | null {
 	return null;
 }
 
-let cachedPort: number | null = null;
-
 function getBridgeUrl(): string {
-	// Env var override takes priority (for testing / manual config)
+	// Env var override takes priority (for testing / manual config).
 	if (process.env.BROWSER_BRIDGE_PORT) {
 		return `http://127.0.0.1:${process.env.BROWSER_BRIDGE_PORT}`;
 	}
-	if (cachedPort) {
-		return `http://127.0.0.1:${cachedPort}`;
-	}
+	// Re-discover on every call. Caching was unsafe: VS Code windows shift
+	// ports on reload (port 3788 may have been pottagold at startup but become
+	// integrated-browser-mcp after a reload), so a cached port can silently
+	// route calls to the wrong workspace's bridge. Filesystem-reading the
+	// instances dir each time costs ~1ms, well worth the correctness.
 	const port = discoverPort();
-	if (port) {
-		cachedPort = port;
-		return `http://127.0.0.1:${port}`;
-	}
-	// Last resort default
+	if (port) return `http://127.0.0.1:${port}`;
+	// Last resort default — the lowest port the extension tries to bind.
 	return 'http://127.0.0.1:3788';
 }
 
@@ -86,17 +83,8 @@ async function bridgeFetch(urlPath: string, options?: RequestInit): Promise<{ ok
 		const res = await fetch(`${base}${urlPath}`, options);
 		return await res.json() as { ok: boolean; data?: unknown; error?: string };
 	} catch {
-		// Connection failed — invalidate cache and retry discovery once
-		if (cachedPort) {
-			cachedPort = null;
-			const base = getBridgeUrl();
-			try {
-				const res = await fetch(`${base}${urlPath}`, options);
-				return await res.json() as { ok: boolean; data?: unknown; error?: string };
-			} catch {
-				// Still failing
-			}
-		}
+		// Each call re-discovers the port, so a second retry doesn't buy us
+		// anything beyond a clearer error message.
 		return { ok: false, error: 'Integrated Browser MCP is not reachable. Make sure VS Code is running with the extension active.' };
 	}
 }
