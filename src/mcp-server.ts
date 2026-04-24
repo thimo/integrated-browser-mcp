@@ -241,6 +241,37 @@ server.tool(
 	},
 );
 
+// Screenshot slice
+server.tool(
+	'browser_screenshot_slice',
+	'Capture one viewport-height slice of a long page, plus page metadata. Designed for AI consumers of tall pages where a single full-page PNG either fails (Chromium caps single-image axes at ~16384 px) or compresses to an unreadable thumbnail. Call with no `slice` first to learn the shape (returns `totalSlices`, `scrollHeight`, `viewportHeight`, no image), then request specific slices by index. `slice: 0` is the top (header), `slice: -1` is the last slice (footer); negative indices count from the end. Out-of-range indices clamp. Pair with `browser_emulate` first to anchor the viewport at a real desktop/mobile size — slicing the editor pane\'s natural width gives meaningless results. Note: this tool scrolls the target tab — use `browser_scroll` to restore if needed.',
+	{
+		slice: z.number().int().optional().describe('0-indexed slice to capture. Negative counts from the end (-1 = last, -2 = second-to-last). Omit to get metadata only.'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ slice, tabId }) => {
+		const params = new URLSearchParams();
+		if (typeof slice === 'number') params.set('slice', String(slice));
+		if (tabId) params.set('tabId', tabId);
+		const qs = params.toString() ? `?${params}` : '';
+		const result = await bridgeFetch(`/screenshot-slice${qs}`);
+		if (!result.ok) {
+			return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
+		}
+		const data = result.data as { totalSlices: number; scrollHeight: number; viewportHeight: number; slice: number | null; image?: string };
+		const summary = data.slice === null
+			? `Page has ${data.totalSlices} slice(s) — scrollHeight ${data.scrollHeight}px, viewport ${data.viewportHeight}px. Pass slice:0 for the top, slice:-1 for the footer.`
+			: `Slice ${data.slice} of ${data.totalSlices} (y=${data.slice * data.viewportHeight}–${Math.min((data.slice + 1) * data.viewportHeight, data.scrollHeight)}px of ${data.scrollHeight}px total).`;
+		const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
+			{ type: 'text' as const, text: summary },
+		];
+		if (data.image) {
+			content.push({ type: 'image' as const, data: data.image, mimeType: 'image/png' });
+		}
+		return { content };
+	},
+);
+
 // Snapshot (accessibility tree)
 server.tool(
 	'browser_snapshot',

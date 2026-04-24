@@ -327,6 +327,56 @@ export class BridgeServer {
 			}
 		});
 
+		// Scroll-and-capture one viewport-height slice. Returns metadata
+		// always, image only when `slice` is provided. Designed for AI
+		// consumers of tall pages: Chromium's single-PNG axis cap
+		// (~16384 px) makes `fullPage` capture fail on huge docs, and
+		// compressing a 60k-px-tall image to thumbnail loses the detail
+		// the model needs anyway. The AI-friendlier flow is (1) call
+		// with no slice to learn the page shape, (2) request specific
+		// slices by index. `slice: 0` is the top, `slice: -1` is the
+		// last (Pythonic negative indexing). Out-of-range clamps.
+		// Pair with `browser_emulate` first to anchor the viewport at a
+		// real desktop/mobile size — slicing the editor pane's natural
+		// width gives meaningless results.
+		this.app.get('/screenshot-slice', anyTab, async (req, res) => {
+			try {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const dims = await resolved.tab.send('Runtime.evaluate', {
+					expression: '({scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight})',
+					returnByValue: true,
+				}) as { result: { value: { scrollHeight: number; viewportHeight: number } } };
+				const { scrollHeight, viewportHeight } = dims.result.value;
+				const totalSlices = Math.max(1, Math.ceil(scrollHeight / viewportHeight));
+
+				const sliceParam = req.query.slice;
+				if (sliceParam === undefined || sliceParam === '') {
+					res.json({ ok: true, data: { totalSlices, scrollHeight, viewportHeight, slice: null } });
+					return;
+				}
+				const rawSlice = Number(sliceParam);
+				if (!Number.isFinite(rawSlice)) {
+					res.json({ ok: false, error: 'slice must be an integer (negative counts from end)' });
+					return;
+				}
+				let slice = Math.trunc(rawSlice);
+				if (slice < 0) slice = totalSlices + slice;
+				slice = Math.max(0, Math.min(totalSlices - 1, slice));
+
+				const targetY = slice * viewportHeight;
+				await resolved.tab.send('Runtime.evaluate', {
+					expression: `window.scrollTo(0, ${targetY}); new Promise(r => setTimeout(r, 200))`,
+					returnByValue: true,
+					awaitPromise: true,
+				});
+				const shot = await resolved.tab.send('Page.captureScreenshot', { format: 'png' }) as { data: string };
+				res.json({ ok: true, data: { totalSlices, scrollHeight, viewportHeight, slice, image: shot.data } });
+			} catch (err) {
+				res.json({ ok: false, error: String(err) });
+			}
+		});
+
 		// Accessibility snapshot
 		this.app.get('/snapshot', anyTab, async (req, res) => {
 			try {
