@@ -3,7 +3,6 @@ import type { CDPState } from './cdp';
 
 export class StatusBar {
 	private item: vscode.StatusBarItem;
-	private everConnected = false;
 
 	constructor() {
 		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -18,8 +17,6 @@ export class StatusBar {
 		transport?: 'websocket' | 'browserTab' | null,
 		tabs: { count: number; activeUrl?: string } = { count: 0 },
 	): void {
-		if (cdpState === 'connected') this.everConnected = true;
-
 		const transportTag = transport === 'browserTab' ? ' (proposed)'
 			: transport === 'websocket' ? ' (debug-session)'
 			: '';
@@ -31,24 +28,30 @@ export class StatusBar {
 			this.item.text = '$(circle-slash) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Off';
 			this.item.backgroundColor = undefined;
+			this.item.color = undefined;
 		} else if (cdpState === 'connected') {
 			this.item.text = `$(broadcast) Browser MCP${countSuffix}`;
 			this.item.tooltip = `Browser MCP: Connected${transportTag}${activeUrlLine}${tabLine}`;
 			this.item.backgroundColor = undefined;
+			this.item.color = undefined;
 		} else if (cdpState === 'connecting') {
 			this.item.text = '$(sync~spin) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Connecting...';
 			this.item.backgroundColor = undefined;
-		} else if (this.everConnected) {
-			// Lost a previously live connection — something went wrong.
+			this.item.color = undefined;
+		} else if (tabs.count > 0) {
+			// Tabs exist but none is connected — the CDP link dropped
+			// unexpectedly. Warn so the user knows.
 			this.item.text = '$(warning) Browser MCP';
-			this.item.tooltip = 'Browser MCP: Disconnected';
+			this.item.tooltip = `Browser MCP: Disconnected${tabLine}`;
 			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+			this.item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
 		} else {
-			// Idle: bridge is up, just hasn't been asked to open a browser yet.
+			// Idle: bridge is up, no tabs open. Not an error state.
 			this.item.text = '$(circle-outline) Browser MCP';
-			this.item.tooltip = 'Browser MCP: Idle (no browser open)';
+			this.item.tooltip = 'Browser MCP: Idle (no browser tabs)';
 			this.item.backgroundColor = undefined;
+			this.item.color = undefined;
 		}
 	}
 

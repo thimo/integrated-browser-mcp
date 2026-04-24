@@ -47,6 +47,16 @@ export class CDPManager {
 	readonly onStateChange = this._onStateChange.event;
 	private _lastEmittedState: CDPState = 'disconnected';
 
+	/**
+	 * Unique-per-process id used to mark BrowserTabs we own. VS Code's
+	 * proposed `browser` API exposes tabs to every extension host that has
+	 * the proposal enabled — across all windows. Without a cooperation
+	 * marker, two bridge instances (e.g. two VS Code windows with this
+	 * extension) would both adopt the same BrowserTab, install competing
+	 * title scripts, and cause title oscillation + eventual page crash.
+	 */
+	readonly ownerId = 'owner-' + crypto.randomBytes(6).toString('hex');
+
 	/** Pick the lowest unused display number so new tabs reclaim gaps left by closed tabs. */
 	private allocateNumber(): number {
 		const used = new Set<number>();
@@ -164,8 +174,24 @@ export class CDPManager {
 			tab.displayNumber = this.allocateNumber();
 			this.registerTab(tab);
 			await tab.connectToBrowserTab(browserTab);
+
+			// Ownership handshake: if another 0.4.0+ bridge (different VS Code
+			// window with the proposed API) already owns this tab, back off.
+			// Without this, two bridges install competing title-prefix scripts
+			// and the title oscillates until the page crashes.
+			const owner = await tab.claimOwnership(this.ownerId);
+			if (owner && owner !== this.ownerId) {
+				this.log.appendLine(`[Bridge] Tab already owned by ${owner}; releasing (url: ${browserTab.url})`);
+				tab.displayNumber = null;
+				await tab.disconnect().catch(() => undefined);
+				this.tabSubscriptions.get(tab.tabId)?.dispose();
+				this.tabSubscriptions.delete(tab.tabId);
+				this.tabs.delete(tab.tabId);
+				throw new Error(`tab owned by ${owner}`);
+			}
+
 			if (tab.displayNumber !== null) {
-				await tab.setTitlePrefix(numberToPrefix(tab.displayNumber));
+				await tab.setTitlePrefix(numberToPrefix(tab.displayNumber), this.ownerId);
 			}
 			if (makeActive || this.tabs.size === 1) this._activeTabId = tab.tabId;
 			this.emitStateChange();

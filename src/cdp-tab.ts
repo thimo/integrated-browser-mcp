@@ -322,8 +322,9 @@ export class CDPTab {
 	 * previous MutationObserver before installing a new one, and share the
 	 * document.title setter interception via a one-time flag.
 	 */
-	private buildTitleScript(prefix: string): string {
+	private buildTitleScript(prefix: string, ownerId: string | null): string {
 		const prefixJson = JSON.stringify(prefix);
+		const ownerJson = JSON.stringify(ownerId);
 		// Known bridge markers across extension versions:
 		//   - `(N) ` — current parenthesised decimal (0.4.0+)
 		//   - `[N] ` — interim bracketed decimal (short-lived)
@@ -339,14 +340,29 @@ export class CDPTab {
 		return `(function(){
 			var P = ${prefixJson};
 			var STRIP = ${STRIP_RE};
+			var MY_OWNER = ${ownerJson};
+			// Honour ownership claimed by another 0.4.0+ instance (different
+			// VS Code window with the proposed API enabled). Don't install an
+			// observer — that would fight with theirs and flicker the title.
+			if (MY_OWNER && window.__bridgeOwner && window.__bridgeOwner !== MY_OWNER) return;
+			if (MY_OWNER) window.__bridgeOwner = MY_OWNER;
 			var updating = false;
 
+			// Back-off against stale observers from older extension versions
+			// (e.g. a 0.3.0 MutationObserver still alive in the page JS context
+			// from before the extension was upgraded). If we set the title
+			// more than 10 times within a second, someone else is undoing our
+			// writes — give up so we don't burn CPU in a title-war.
+			var fightCount = 0;
+			var fightWindowStart = 0;
+			var gaveUp = false;
+			var FIGHT_THRESHOLD = 10;
+			var FIGHT_WINDOW_MS = 1000;
+
 			function ensurePrefix() {
-				if (updating) return;
+				if (updating || gaveUp) return;
 				var el = document.querySelector('title');
 				if (!el) {
-					// Create a <title> so pages without one (about:blank, some
-					// API responses) still show the tab number prefix.
 					var host = document.head || document.documentElement;
 					if (!host) return;
 					el = document.createElement('title');
@@ -356,11 +372,29 @@ export class CDPTab {
 				}
 				var stripped = el.textContent.replace(STRIP, '');
 				var want = P + stripped;
-				if (el.textContent !== want) {
-					updating = true;
-					el.textContent = want;
-					updating = false;
+				if (el.textContent === want) return;
+
+				var now = Date.now();
+				if (now - fightWindowStart > FIGHT_WINDOW_MS) {
+					fightCount = 0;
+					fightWindowStart = now;
 				}
+				fightCount++;
+				if (fightCount > FIGHT_THRESHOLD) {
+					gaveUp = true;
+					try { if (window.__bridgeTitleObserver) window.__bridgeTitleObserver.disconnect(); } catch (_) {}
+					// Strip our own prefix one last time so the rival's marker
+					// stands alone. Otherwise we leave a stacked "◉ (N) Title"
+					// behind until the tab reloads.
+					updating = true;
+					el.textContent = stripped;
+					updating = false;
+					return;
+				}
+
+				updating = true;
+				el.textContent = want;
+				updating = false;
 			}
 
 			// Replace any previous observer installed by a prior prefix update.
@@ -505,17 +539,70 @@ export class CDPTab {
 		}
 	}
 
+	/** Set when `claimOwnership` succeeds so `disconnect()` can release cleanly. */
+	private claimedOwnerId: string | null = null;
+
 	/**
-	 * Install or update the tab-title prefix (e.g. "① "). Called by CDPManager
-	 * on adopt and on renumber. Idempotent: skips CDP work if the prefix is
-	 * already the requested one.
+	 * Atomically claim ownership of this tab's page. Returns the currently
+	 * winning owner id — if it matches `ownerId`, we own the tab; otherwise
+	 * another extension host (different VS Code window with the proposed API
+	 * enabled) got there first. The check-and-set runs in a single JS
+	 * microtask so two concurrent bridges don't both believe they own.
 	 */
-	async setTitlePrefix(prefix: string): Promise<void> {
+	async claimOwnership(ownerId: string): Promise<string | null> {
+		try {
+			const idJson = JSON.stringify(ownerId);
+			const result = await this.send('Runtime.evaluate', {
+				expression: `(function(){
+					if (window.__bridgeOwner) return window.__bridgeOwner;
+					window.__bridgeOwner = ${idJson};
+					return ${idJson};
+				})()`,
+				returnByValue: true,
+			}) as { result: { value?: string } };
+			const winner = result.result.value ?? null;
+			if (winner === ownerId) this.claimedOwnerId = ownerId;
+			return winner;
+		} catch (err) {
+			this.log.appendLine(`[CDP:${this.tabId}] ownership claim failed: ${err}`);
+			return null;
+		}
+	}
+
+	/**
+	 * Clear our ownership marker so the next bridge instance (e.g. a window
+	 * reload starting a fresh CDPManager with a new ownerId) can reclaim
+	 * this tab. Best-effort — if the CDP session is already gone, we skip.
+	 */
+	private async releaseOwnership(): Promise<void> {
+		if (!this.claimedOwnerId) return;
+		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
+		if (!hasTransport) return;
+		try {
+			await this.send('Runtime.evaluate', {
+				expression: `(function(){
+					if (window.__bridgeOwner === ${JSON.stringify(this.claimedOwnerId)}) {
+						delete window.__bridgeOwner;
+					}
+				})()`,
+			}, { timeoutMs: 2000 });
+		} catch {
+			// best-effort
+		}
+		this.claimedOwnerId = null;
+	}
+
+	/**
+	 * Install or update the tab-title prefix (e.g. "(1) "). Called by
+	 * CDPManager on adopt and on renumber. Idempotent: skips CDP work if the
+	 * prefix is already the requested one.
+	 */
+	async setTitlePrefix(prefix: string, ownerId?: string): Promise<void> {
 		if (this.currentTitlePrefix === prefix) return;
 		this.currentTitlePrefix = prefix;
 		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
 		if (!hasTransport) return;
-		const script = this.buildTitleScript(prefix);
+		const script = this.buildTitleScript(prefix, ownerId ?? null);
 		try {
 			// Remove prior on-new-document script (if any) before adding the new one.
 			if (this.titleScriptId) {
@@ -742,6 +829,9 @@ export class CDPTab {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
+		// Release ownership BEFORE tearing down transport — once the CDP
+		// session closes we can't do page-level JS cleanup.
+		await this.releaseOwnership();
 		this._session = null;
 		this._sessionId = null;
 		this._pageSessionId = null;

@@ -5,6 +5,13 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-04-24
+
+### Fixed
+- Title-oscillation-and-crash on reload: when a VS Code window hosting browser tabs was reloaded, the freshly-activated 0.4.0 bridge installed its own title-prefix observer while the **previous extension version's observer was still alive in the page's JavaScript context** (the CDP session was torn down on reload, but the observer was injected via `Runtime.evaluate` and lives independently). The two observers fought — stripping and re-prepending each other's marker — until the page thread eventually crashed.
+  - The new title script detects the pattern: if it sets the title more than 10 times within a second, it disconnects its own observer and backs off. The losing tab keeps whatever prefix the rival observer sets; the page stays responsive. Freshly-opened tabs (post-upgrade) are unaffected.
+  - Also adds a per-process ownership marker (`window.__bridgeOwner`) used atomically at adopt time, as defence-in-depth for any future scenario where two 0.4.1+ instances could race on the same page. The marker is released on disconnect so a reloaded window cleanly reclaims its tabs.
+
 ## [0.4.0] — 2026-04-24
 
 ### Added
