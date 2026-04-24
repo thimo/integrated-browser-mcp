@@ -8,9 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.1] — 2026-04-24
 
 ### Added
-- MCP server now sends a top-level `instructions` field on connect explaining how the browser integration works (visible inside VS Code, numbered tabs, tool-selection guidance). AI agents that honour the MCP `instructions` field automatically pick this up.
-- Tool descriptions rewritten with concrete "when to use" guidance. `browser_eval` is now explicitly recommended over `browser_dom` and `browser_screenshot` for reading specific data.
-- README gains a "Briefing an AI agent" snippet users can paste into their project `CLAUDE.md` to reinforce the MCP's usage conventions.
+- MCP server now sends a top-level `instructions` field on connect describing the integration (browser lives inside VS Code, numbered tabs, which tool is cheap vs expensive). Clients that honour the MCP spec's instructions field surface this to the model automatically.
+- Tool descriptions rewritten with concrete intra-MCP guidance. `browser_eval` is explicitly positioned as the preferred read path; `browser_dom` and `browser_screenshot` are flagged as heavier alternatives.
+- README gains a "Briefing an AI agent" section with a CLAUDE.md snippet users can paste into their project — the place for prescriptive user preferences like "prefer this MCP over the system browser".
 
 ### Fixed
 - Title-oscillation-and-crash on reload: when a VS Code window hosting browser tabs was reloaded, the freshly-activated 0.4.0 bridge installed its own title-prefix observer while the **previous extension version's observer was still alive in the page's JavaScript context** (the CDP session was torn down on reload, but the observer was injected via `Runtime.evaluate` and lives independently). The two observers fought — stripping and re-prepending each other's marker — until the page thread eventually crashed.

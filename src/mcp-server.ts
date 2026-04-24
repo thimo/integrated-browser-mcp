@@ -123,8 +123,6 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 const SERVER_INSTRUCTIONS = `
 This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
 
-**When the user says "open <URL>", "visit <URL>", "navigate to <URL>", or similar, use \`browser_navigate\` or \`browser_tab_open\` from THIS MCP.** Do not shell out to \`open\`, \`xdg-open\`, \`start\`, or any external browser — those launch the user's system browser and defeat the whole point of this integration. The user expects to see the page inside their VS Code window.
-
 Each tab has a stable number shown as a \`(N) \` prefix in the tab title (e.g. "(1) Pottagold", "(2) Profit and loss"). \`browser_tab_list\` returns the same number in its \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number.
 
 Target a specific tab by passing \`tabId\` (from \`browser_tab_list\` or \`browser_tab_open\`) to any interaction tool. Omit \`tabId\` to use the active tab.
@@ -153,7 +151,7 @@ const tabIdDescription = 'Optional browser tab id (e.g. "tab-ab12cd"). Omit to u
 // Navigate
 server.tool(
 	'browser_navigate',
-	'Open or visit a URL in the integrated VS Code browser. USE THIS whenever the user says "open <URL>", "visit <URL>", "navigate to <URL>" — never shell out to `open`, `xdg-open`, or `start`. Replaces the current page (previous page is gone — use browser_tab_open to keep it).',
+	'Navigate the target tab to a URL in the integrated VS Code browser. Replaces the current page — use browser_tab_open to keep the previous page accessible.',
 	{
 		url: z.string().describe('The URL to navigate to'),
 		tabId: z.string().optional().describe(tabIdDescription),
