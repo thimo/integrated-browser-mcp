@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All existing interaction tools (`browser_navigate`, `browser_eval`, `browser_click`, `browser_type`, `browser_scroll`, `browser_screenshot`, `browser_snapshot`, `browser_dom`, `browser_url`, `browser_console`, `browser_network`, `browser_network_clear`) now accept an optional `tabId` parameter. Omit to target the active tab.
   - `browser_console` and `browser_network` aggregate across all tabs by default. Each entry carries its originating `tabId`. Pass `tabId` to filter to one tab.
   - The bridge tracks tabs opened via MCP, via the VS Code UI, or at startup (`window.browserTabs`). Active-tab changes in the VS Code UI sync to our internal default.
-  - New HTTP endpoints: `POST /tab/open`, `POST /tab/close/:tabId`, `POST /tab/activate/:tabId`; `GET /tabs` now returns `[{ tabId, url, title, active, state, transport }]`.
+  - New HTTP endpoints: `POST /tab/open`, `POST /tab/close/:tabId`, `POST /tab/activate/:tabId`; `GET /tabs` now returns `[{ tabId, number, url, title, active, state, transport }]`.
+  - Each tab gets a **stable display number** (1, 2, 3…) with reuse of vacated numbers (close tab 3 → next new tab gets 3; tab 4 stays tab 4). The number appears as a `(N) ` prefix on the tab title (auto-created if the page has no `<title>`) so you can refer to tabs conversationally ("reload browser 2") and match them against `browser_tab_list`'s `number` field.
 - Status bar tooltip shows active tab URL and tab count when multiple tabs are open; label shows `Browser MCP (N)` when N > 1.
 
 ### Changed

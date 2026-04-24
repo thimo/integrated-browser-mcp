@@ -187,10 +187,12 @@ Caveat: the `browser` proposal is still [tracked upstream](https://github.com/mi
 Multi-tab support requires the proposed API (previous section). When enabled:
 
 - `browser_tab_open("https://example.com")` opens a new tab, returns its `tabId`.
-- `browser_tab_list()` shows all open tabs — the `active` flag marks which one receives commands by default.
+- `browser_tab_list()` shows all open tabs — the `active` flag marks which one receives commands by default, and the `number` field (1, 2, 3…) matches the `(N) ` prefix in each tab's title. Numbers are stable per tab with reuse: close tab 3 and the next new tab gets 3, but tab 4 stays tab 4 for its lifetime.
 - Every interaction tool (`browser_navigate`, `browser_eval`, `browser_click`, etc.) accepts an optional `tabId`. Omit it to target the active tab; pass it to target a specific tab.
 - `browser_console` and `browser_network` aggregate across all tabs by default — each entry carries the `tabId` of the tab it came from. Pass `tabId` to filter.
 - Closing a tab in the VS Code UI is picked up automatically; the bridge untracks it and the `tabId` becomes invalid.
+
+The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. The bridge strips any prefix a prior version of the extension may have left on a pre-existing tab, so you won't see stacked markers after an upgrade.
 
 On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
 
