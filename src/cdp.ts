@@ -174,25 +174,13 @@ export class CDPManager {
 			this.registerTab(tab);
 			await tab.connectToBrowserTab(browserTab);
 
-			// Ownership handshake: if another 0.4.0+ bridge (different VS Code
-			// window with the proposed API) already owns this tab, back off.
-			// Without this, two bridges install competing title-prefix scripts
-			// and the title oscillates until the page crashes.
-			const owner = await tab.claimOwnership(this.ownerId);
-			if (owner && owner !== this.ownerId) {
-				this.log.appendLine(`[Bridge] Tab already owned by ${owner}; releasing (url: ${browserTab.url})`);
-				tab.displayNumber = null;
-				await tab.disconnect().catch(() => undefined);
-				this.tabSubscriptions.get(tab.tabId)?.dispose();
-				this.tabSubscriptions.delete(tab.tabId);
-				this.tabs.delete(tab.tabId);
-				// Tab went into the map briefly (the tab.onStateChange listener
-				// that fires from disconnect() sees the tab before we delete it,
-				// so manager.state reports "tabs exist but disconnected" →
-				// warning). Re-emit now that the tab is truly gone.
-				this.emitStateChange();
-				throw new Error(`tab owned by ${owner}`);
-			}
+			// No bridge-level ownership handshake: the proposed API is
+			// per-window, so two bridges never see the same tab. The check
+			// we used to have here blocked legitimate reclaim after a window
+			// reload (previous instance leaves a stale `window.__bridgeOwner`
+			// in the page JS; a fresh instance must be allowed to take over).
+			// The title-script's own loop-detection backs off cleanly if it
+			// does somehow end up fighting a stale observer.
 
 			if (tab.displayNumber !== null) {
 				await tab.setTitlePrefix(numberToPrefix(tab.displayNumber), this.ownerId);

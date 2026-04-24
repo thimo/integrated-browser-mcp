@@ -341,10 +341,10 @@ export class CDPTab {
 			var P = ${prefixJson};
 			var STRIP = ${STRIP_RE};
 			var MY_OWNER = ${ownerJson};
-			// Honour ownership claimed by another 0.4.0+ instance (different
-			// VS Code window with the proposed API enabled). Don't install an
-			// observer — that would fight with theirs and flicker the title.
-			if (MY_OWNER && window.__bridgeOwner && window.__bridgeOwner !== MY_OWNER) return;
+			// Record our owner id for diagnostics; no longer used to gate
+			// installation. A window reload would leave the previous
+			// instance's id here, and respecting it would block the new
+			// instance from re-installing — breaking the common case.
 			if (MY_OWNER) window.__bridgeOwner = MY_OWNER;
 			var updating = false;
 
@@ -539,59 +539,6 @@ export class CDPTab {
 		} catch (err) {
 			this.log.appendLine(`[CDP:${this.tabId}] setAutoAttach not supported (${err}); child sessions will not be captured`);
 		}
-	}
-
-	/** Set when `claimOwnership` succeeds so `disconnect()` can release cleanly. */
-	private claimedOwnerId: string | null = null;
-
-	/**
-	 * Atomically claim ownership of this tab's page. Returns the currently
-	 * winning owner id — if it matches `ownerId`, we own the tab; otherwise
-	 * another extension host (different VS Code window with the proposed API
-	 * enabled) got there first. The check-and-set runs in a single JS
-	 * microtask so two concurrent bridges don't both believe they own.
-	 */
-	async claimOwnership(ownerId: string): Promise<string | null> {
-		try {
-			const idJson = JSON.stringify(ownerId);
-			const result = await this.send('Runtime.evaluate', {
-				expression: `(function(){
-					if (window.__bridgeOwner) return window.__bridgeOwner;
-					window.__bridgeOwner = ${idJson};
-					return ${idJson};
-				})()`,
-				returnByValue: true,
-			}) as { result: { value?: string } };
-			const winner = result.result.value ?? null;
-			if (winner === ownerId) this.claimedOwnerId = ownerId;
-			return winner;
-		} catch (err) {
-			this.log.appendLine(`[CDP:${this.tabId}] ownership claim failed: ${err}`);
-			return null;
-		}
-	}
-
-	/**
-	 * Clear our ownership marker so the next bridge instance (e.g. a window
-	 * reload starting a fresh CDPManager with a new ownerId) can reclaim
-	 * this tab. Best-effort — if the CDP session is already gone, we skip.
-	 */
-	private async releaseOwnership(): Promise<void> {
-		if (!this.claimedOwnerId) return;
-		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
-		if (!hasTransport) return;
-		try {
-			await this.send('Runtime.evaluate', {
-				expression: `(function(){
-					if (window.__bridgeOwner === ${JSON.stringify(this.claimedOwnerId)}) {
-						delete window.__bridgeOwner;
-					}
-				})()`,
-			}, { timeoutMs: 2000 });
-		} catch {
-			// best-effort
-		}
-		this.claimedOwnerId = null;
 	}
 
 	/**
@@ -831,9 +778,6 @@ export class CDPTab {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
-		// Release ownership BEFORE tearing down transport — once the CDP
-		// session closes we can't do page-level JS cleanup.
-		await this.releaseOwnership();
 		this._session = null;
 		this._sessionId = null;
 		this._pageSessionId = null;
