@@ -377,6 +377,97 @@ export class BridgeServer {
 			}
 		});
 
+		// Markdown extraction. Pure-JS DOM walker injected into the page;
+		// no Readability/Turndown, no deps. Maps headings → `#`, links →
+		// `[text](url)`, code/pre → backtick markup, lists → `-` / `1.`,
+		// blockquotes → `>`. Skips script/style/svg/iframe/button.
+		//
+		// Two non-obvious refinements over a naive walker, both forced by
+		// real-world docs sites (Apple Developer in particular):
+		//
+		//  1. *Link-text trim.* Apple's HTML often contains `<a> View </a>`
+		//     with whitespace inside the anchor. A naive walker emits
+		//     `[ View ](...)`, which renders with literal brackets-with-
+		//     spaces in most markdown viewers. Trimming the inner text
+		//     before bracketing produces clean `[View](...)`.
+		//
+		//  2. *Inline-sibling separator.* When a parent contains adjacent
+		//     inline elements with no whitespace between them in the
+		//     source — Apple's platform availability is the canonical
+		//     case: `<span>iOS 13.0+</span><span>iPadOS 13.0+</span>` —
+		//     concatenating their text gives the run-on "iOS 13.0+iPadOS
+		//     13.0+". When walking children, if two adjacent kids are
+		//     both inline elements and the join would mash non-whitespace
+		//     against non-whitespace, insert a single space. A boundary
+		//     character on either side (punctuation, whitespace) opts out
+		//     so we don't break `<strong>word</strong>.`.
+		this.app.get('/markdown', anyTab, async (req, res) => {
+			try {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const selector = (req.query.selector as string | undefined) || 'main';
+				const expression = `(() => {
+					const root = document.querySelector(${JSON.stringify(selector)}) || document.body;
+					const SKIP = new Set(['script','style','noscript','svg','iframe','button']);
+					const INLINE = new Set(['span','a','strong','b','em','i','code','small','sub','sup','mark']);
+					function walk(n) {
+						if (n.nodeType === 3) return n.textContent.replace(/\\s+/g, ' ');
+						if (n.nodeType !== 1) return '';
+						const tag = n.tagName.toLowerCase();
+						if (SKIP.has(tag)) return '';
+						let kids = '';
+						let prev = null;
+						for (const c of n.childNodes) {
+							const p = walk(c);
+							if (!p) continue;
+							if (kids && prev && prev.nodeType === 1 && INLINE.has(prev.tagName.toLowerCase())
+									&& c.nodeType === 1 && INLINE.has(c.tagName.toLowerCase())) {
+								const lc = kids[kids.length - 1], fc = p[0];
+								if (/\\S/.test(lc) && /\\S/.test(fc)) kids += ' ';
+							}
+							kids += p;
+							prev = c;
+						}
+						switch (tag) {
+							case 'h1': return '\\n\\n# ' + kids.trim() + '\\n\\n';
+							case 'h2': return '\\n\\n## ' + kids.trim() + '\\n\\n';
+							case 'h3': return '\\n\\n### ' + kids.trim() + '\\n\\n';
+							case 'h4': return '\\n\\n#### ' + kids.trim() + '\\n\\n';
+							case 'h5': return '\\n\\n##### ' + kids.trim() + '\\n\\n';
+							case 'h6': return '\\n\\n###### ' + kids.trim() + '\\n\\n';
+							case 'p': return '\\n\\n' + kids.trim() + '\\n\\n';
+							case 'br': return '\\n';
+							case 'hr': return '\\n\\n---\\n\\n';
+							case 'strong': case 'b': return '**' + kids + '**';
+							case 'em': case 'i': return '*' + kids + '*';
+							case 'code':
+								if (n.parentElement && n.parentElement.tagName === 'PRE') return kids;
+								return '\`' + kids + '\`';
+							case 'pre': return '\\n\\n\`\`\`\\n' + n.textContent.trim() + '\\n\`\`\`\\n\\n';
+							case 'a': { const h = n.getAttribute('href'); const t = kids.trim(); return h ? '[' + t + '](' + h + ')' : t; }
+							case 'img': { const a = n.getAttribute('alt') || ''; const s = n.getAttribute('src') || ''; return s ? '![' + a + '](' + s + ')' : ''; }
+							case 'li': { const ord = n.parentElement && n.parentElement.tagName === 'OL'; return (ord ? '1. ' : '- ') + kids.trim() + '\\n'; }
+							case 'ul': case 'ol': return '\\n' + kids + '\\n';
+							case 'blockquote': return '\\n' + kids.split('\\n').map(l => l ? '> ' + l : '').join('\\n') + '\\n\\n';
+							default: return kids;
+						}
+					}
+					return walk(root).replace(/\\n{3,}/g, '\\n\\n').replace(/[ \\t]+$/gm, '').trim();
+				})()`;
+				const result = await resolved.tab.send('Runtime.evaluate', {
+					expression,
+					returnByValue: true,
+				}) as { result: { value?: string; description?: string }; exceptionDetails?: unknown };
+				if (result.exceptionDetails) {
+					res.json({ ok: false, error: result.result.description ?? 'Markdown extraction failed' });
+					return;
+				}
+				res.json({ ok: true, data: result.result.value ?? '' });
+			} catch (err) {
+				res.json({ ok: false, error: String(err) });
+			}
+		});
+
 		// Accessibility snapshot
 		this.app.get('/snapshot', anyTab, async (req, res) => {
 			try {

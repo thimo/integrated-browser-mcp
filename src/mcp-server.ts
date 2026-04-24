@@ -272,6 +272,23 @@ server.tool(
 	},
 );
 
+// Markdown
+server.tool(
+	'browser_markdown',
+	'Extract page content as markdown. Walks the DOM in-page (~80 lines of pure JS, no Readability/Turndown, no deps). Headings → `#`, links → `[text](url)`, code → backticks, pre → fenced blocks, lists → `-` / `1.`, blockquotes → `>`, images → `![alt](src)`. By default scopes to `<main>` if present, else `<body>`; pass `selector` to scope elsewhere. Useful for letting an agent read a doc page without dumping the entire DOM (browser_dom is much heavier). Lightweight extractor, not Turndown — output may include layout artifacts on heavily designed sites; for those use browser_dom + your own post-processing.',
+	{
+		selector: z.string().optional().describe('CSS selector to scope extraction to (e.g. "article", "#content"). Default: "main" if present, else body.'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ selector, tabId }) => {
+		const params = new URLSearchParams();
+		if (selector) params.set('selector', selector);
+		if (tabId) params.set('tabId', tabId);
+		const qs = params.toString() ? `?${params}` : '';
+		return toMcpResult(await bridgeFetch(`/markdown${qs}`));
+	},
+);
+
 // Snapshot (accessibility tree)
 server.tool(
 	'browser_snapshot',
