@@ -108,8 +108,9 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_click` | Click an element by CSS selector |
 | `browser_type` | Type text into an element by CSS selector |
 | `browser_scroll` | Scroll the page or a specific element |
-| `browser_screenshot` | Take a screenshot (returns image) |
+| `browser_screenshot` | Take a screenshot (returns image). Supports `fullPage` for whole-document capture and `waitMs` for post-transition timing. |
 | `browser_snapshot` | Get the accessibility tree |
+| `browser_emulate` | Override viewport dimensions, DPR, mobile flag, and User-Agent. Sticky until `reset:true`. |
 | `browser_dom` | Get the full page HTML |
 | `browser_console` | Read buffered console output (aggregates across tabs when `tabId` omitted) |
 | `browser_network` | Read buffered network requests (aggregates across tabs when `tabId` omitted) |
@@ -137,7 +138,8 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 | POST | `/click` | `{ selector, tabId? }` | Click element by CSS selector |
 | POST | `/type` | `{ selector, text, tabId? }` | Type into element |
 | POST | `/scroll` | `{ deltaX, deltaY, selector?, tabId? }` | Scroll page or element |
-| GET | `/screenshot` | `?tabId=X` | Base64 PNG screenshot |
+| GET | `/screenshot` | `?tabId=X&fullPage=true&waitMs=N` | Base64 PNG screenshot. `fullPage=true` captures beyond the viewport. `waitMs` sleeps before capture (handles CSS transitions). |
+| POST | `/emulate` | `{ width, height, deviceScaleFactor?, mobile?, userAgent?, reset?, tabId? }` | Device-metric override. `{reset:true}` clears. |
 | GET | `/snapshot` | `?tabId=X` | Accessibility tree |
 | GET | `/dom` | `?tabId=X` | Full page outerHTML |
 | GET | `/console` | `?limit=N&tabId=X` | Buffered console output (last 200). Aggregates across tabs when `tabId` omitted. |

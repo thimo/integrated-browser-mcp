@@ -253,15 +253,75 @@ export class BridgeServer {
 			}
 		});
 
-		// Screenshot
+		// Screenshot. `fullPage=true` captures the whole scrollable page
+		// (`captureBeyondViewport`); default is viewport-only. `waitMs`
+		// sleeps before the capture — needed when the page is mid-CSS-
+		// transition (theme flip, view swap), where `className` changes
+		// synchronously but paint lags by the transition duration.
 		this.app.get('/screenshot', anyTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const fullPage = req.query.fullPage === 'true';
+				const waitMs = Number(req.query.waitMs);
+				if (Number.isFinite(waitMs) && waitMs > 0) {
+					await new Promise(resolve => setTimeout(resolve, waitMs));
+				}
 				const result = await resolved.tab.send('Page.captureScreenshot', {
 					format: 'png',
+					captureBeyondViewport: fullPage,
 				}) as { data: string };
 				res.json({ ok: true, data: result.data });
+			} catch (err) {
+				res.json({ ok: false, error: String(err) });
+			}
+		});
+
+		// Emulate device metrics + (when mobile) touch + optional UA.
+		// Sticky until cleared with `{reset:true}` — leaking emulation
+		// between tool calls is a frequent "why does my screenshot look
+		// wrong" source. `mobile:true` also flips touch on so
+		// `(hover:none)` / `(pointer:coarse)` media queries fire;
+		// without that, mobile sites render their desktop fallback even
+		// at iPhone dimensions.
+		//
+		// Uses the deprecated `Page.setDeviceMetricsOverride` rather
+		// than the modern `Emulation.setDeviceMetricsOverride`. In a
+		// normal Chrome they're equivalent, but VS Code's `BrowserTab`
+		// surface silently drops the Emulation call's
+		// width/height/deviceScaleFactor (only the mobile flag sticks).
+		// The deprecated `Page.*` path isn't filtered and is the only
+		// way to get actual viewport + DPR overrides in the integrated
+		// browser pane. `Emulation.clearDeviceMetricsOverride` clears
+		// the Page.* override too, so reset stays one call.
+		this.app.post('/emulate', anyTab, async (req, res) => {
+			try {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const { reset, width, height, deviceScaleFactor, mobile, userAgent } = req.body;
+				if (reset) {
+					await resolved.tab.send('Emulation.clearDeviceMetricsOverride');
+					await resolved.tab.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+					await resolved.tab.send('Emulation.setUserAgentOverride', { userAgent: '' });
+					res.json({ ok: true, data: { reset: true } });
+					return;
+				}
+				if (typeof width !== 'number' || typeof height !== 'number') {
+					res.json({ ok: false, error: 'Missing width and height (or pass {reset:true} to clear)' });
+					return;
+				}
+				const isMobile = mobile === true;
+				await resolved.tab.send('Page.setDeviceMetricsOverride', {
+					width,
+					height,
+					deviceScaleFactor: typeof deviceScaleFactor === 'number' ? deviceScaleFactor : 1,
+					mobile: isMobile,
+				});
+				await resolved.tab.send('Emulation.setTouchEmulationEnabled', { enabled: isMobile });
+				if (typeof userAgent === 'string' && userAgent.length > 0) {
+					await resolved.tab.send('Emulation.setUserAgentOverride', { userAgent });
+				}
+				res.json({ ok: true, data: { width, height, deviceScaleFactor: deviceScaleFactor ?? 1, mobile: isMobile, userAgent: userAgent ?? null } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
 			}

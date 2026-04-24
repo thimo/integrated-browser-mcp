@@ -197,10 +197,18 @@ server.tool(
 // Screenshot
 server.tool(
 	'browser_screenshot',
-	'Capture the page as a PNG (returned as an image). Heavy — use only when visual verification matters. For reading data, browser_eval or browser_snapshot is faster.',
-	{ tabId: z.string().optional().describe(tabIdDescription) },
-	async ({ tabId }) => {
-		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
+	'Capture the page as a PNG (returned as an image). Heavy — use only when visual verification matters. For reading data, browser_eval or browser_snapshot is faster. Pass fullPage:true to capture the whole scrollable page (useful for tall single-page sites or layout audits); default is viewport-only. Pass waitMs to sleep before the capture when the page has running CSS transitions (theme flips, view swaps) — 400–600ms covers most Tailwind transition-colors durations.',
+	{
+		fullPage: z.boolean().optional().describe('Capture the entire scrollable page instead of just the viewport. Default false.'),
+		waitMs: z.number().int().min(0).max(10000).optional().describe('Sleep this many milliseconds before capturing. Use when the page has running CSS transitions — className changes are synchronous but paint lags by the transition duration. Default 0.'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ fullPage, waitMs, tabId }) => {
+		const params = new URLSearchParams();
+		if (fullPage) params.set('fullPage', 'true');
+		if (waitMs) params.set('waitMs', String(waitMs));
+		if (tabId) params.set('tabId', tabId);
+		const qs = params.toString() ? `?${params}` : '';
 		const result = await bridgeFetch(`/screenshot${qs}`);
 		if (!result.ok) {
 			return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
@@ -212,6 +220,24 @@ server.tool(
 				mimeType: 'image/png',
 			}],
 		};
+	},
+);
+
+// Emulate
+server.tool(
+	'browser_emulate',
+	'Override device metrics (width, height, deviceScaleFactor, mobile, optional userAgent) on the target tab. Setting `mobile:true` also enables touch emulation so `(hover:none)` / `(pointer:coarse)` media queries fire — without that, mobile sites render their desktop fallback even at iPhone dimensions. The override persists on the tab until cleared with `{reset:true}` — call reset before tests that should see the natural viewport, otherwise prior emulation will leak.',
+	{
+		width: z.number().int().positive().optional().describe('Viewport width in CSS pixels. Required unless reset is true.'),
+		height: z.number().int().positive().optional().describe('Viewport height in CSS pixels. Required unless reset is true.'),
+		deviceScaleFactor: z.number().positive().optional().describe('Device pixel ratio (e.g. 2 for Retina, 3 for iPhone Pro). Default 1.'),
+		mobile: z.boolean().optional().describe('Emulate a mobile device (enables touch + mobile media queries). Default false.'),
+		userAgent: z.string().optional().describe('Override the User-Agent string. Recommended when emulating mobile so server-side UA sniffing matches.'),
+		reset: z.boolean().optional().describe('Clear all emulation overrides on this tab. Pass alone — other fields are ignored.'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ width, height, deviceScaleFactor, mobile, userAgent, reset, tabId }) => {
+		return toMcpResult(await bridgePost('/emulate', { width, height, deviceScaleFactor, mobile, userAgent, reset, tabId }));
 	},
 );
 

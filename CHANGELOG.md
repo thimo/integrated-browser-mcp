@@ -5,6 +5,14 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `browser_screenshot` now accepts `fullPage: true` to capture the entire scrollable page (maps to CDP's `captureBeyondViewport`). The integrated browser pane is usually narrow, so viewport-only screenshots lose everything below the fold — full-page is what most agent workflows actually want.
+- `browser_screenshot` now accepts `waitMs` to sleep before the capture. Handles the CSS-transition race where `className` changes synchronously (e.g. theme flip) but painted pixels lag by the transition duration; 400–600ms covers most Tailwind `transition-colors` defaults.
+- New `browser_emulate` tool for viewport, DPR, mobile-flag, and User-Agent overrides. Pass `reset: true` to clear. Setting `mobile: true` also enables touch emulation so `(hover: none)` / `(pointer: coarse)` media queries fire — without that, mobile sites render their desktop fallback even at iPhone dimensions.
+  - Uses the *deprecated* `Page.setDeviceMetricsOverride` rather than the modern `Emulation.setDeviceMetricsOverride`. In a normal Chrome process they're equivalent, but VS Code's `BrowserTab` surface silently drops the Emulation call's width/height/deviceScaleFactor (only the mobile flag sticks). The Page.* path isn't filtered and is the only way to get real viewport + DPR overrides inside the editor pane.
+
 ## [0.4.1] — 2026-04-24
 
 ### Added
