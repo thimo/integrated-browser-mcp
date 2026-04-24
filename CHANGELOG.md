@@ -5,6 +5,24 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-24
+
+### Added
+- **Multi-tab support** (proposed-API path only — requires `--enable-proposed-api=thimo.integrated-browser-mcp`).
+  - New MCP tools: `browser_tab_open`, `browser_tab_close`, `browser_tab_list`, `browser_tab_activate`.
+  - All existing interaction tools (`browser_navigate`, `browser_eval`, `browser_click`, `browser_type`, `browser_scroll`, `browser_screenshot`, `browser_snapshot`, `browser_dom`, `browser_url`, `browser_console`, `browser_network`, `browser_network_clear`) now accept an optional `tabId` parameter. Omit to target the active tab.
+  - `browser_console` and `browser_network` aggregate across all tabs by default. Each entry carries its originating `tabId`. Pass `tabId` to filter to one tab.
+  - The bridge tracks tabs opened via MCP, via the VS Code UI, or at startup (`window.browserTabs`). Active-tab changes in the VS Code UI sync to our internal default.
+  - New HTTP endpoints: `POST /tab/open`, `POST /tab/close/:tabId`, `POST /tab/activate/:tabId`; `GET /tabs` now returns `[{ tabId, url, title, active, state, transport }]`.
+- Status bar tooltip shows active tab URL and tab count when multiple tabs are open; label shows `Browser MCP (N)` when N > 1.
+
+### Changed
+- Internal refactor: `CDPConnection` split into `CDPTab` (per-tab state + CDP protocol) and `CDPManager` (multi-tab orchestration). No changes for existing single-tab callers.
+- On the debug-session fallback path (no proposed API), the bridge exposes a single synthetic `tab-main`. `browser_tab_open` returns an error directing users to the proposed-API mode; other tools behave exactly as in 0.3.0.
+
+### Removed
+- `POST /tabs/:id/activate` legacy endpoint (used CDP target ids that weren't stable across restarts). Replaced by `POST /tab/activate/:tabId` with our tab ids.
+
 ## [0.3.0] — 2026-04-23
 
 ### Added

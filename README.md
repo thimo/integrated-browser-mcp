@@ -68,6 +68,8 @@ curl http://127.0.0.1:3788/status
 
 ## MCP tools
 
+All interaction tools accept an optional `tabId` parameter. Omit it to target the active tab.
+
 | Tool | Description |
 |------|-------------|
 | `browser_navigate` | Navigate to a URL |
@@ -78,9 +80,14 @@ curl http://127.0.0.1:3788/status
 | `browser_screenshot` | Take a screenshot (returns image) |
 | `browser_snapshot` | Get the accessibility tree |
 | `browser_dom` | Get the full page HTML |
-| `browser_console` | Read buffered console output |
-| `browser_network` | Read buffered network requests |
+| `browser_console` | Read buffered console output (aggregates across tabs when `tabId` omitted) |
+| `browser_network` | Read buffered network requests (aggregates across tabs when `tabId` omitted) |
+| `browser_network_clear` | Clear the network log |
 | `browser_url` | Get the current page URL |
+| `browser_tab_open` | Open a new browser tab (proposed API only) |
+| `browser_tab_close` | Close a tab by id |
+| `browser_tab_list` | List open tabs with their ids, URLs, titles, and active flag |
+| `browser_tab_activate` | Set the default target tab |
 | `browser_status` | Check bridge connection status |
 
 ## HTTP API
@@ -89,23 +96,27 @@ All responses follow the format `{ ok: true, data: ... }` or `{ ok: false, error
 
 The server binds to `127.0.0.1` only — never exposed to the network.
 
+All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snapshot, dom, url) accept an optional `tabId` — as a `?tabId=` query param on GET requests or in the JSON body on POST. Omit to target the active tab.
+
 | Method | Endpoint | Body | Description |
 |--------|----------|------|-------------|
-| GET | `/status` | — | Bridge health check |
-| POST | `/navigate` | `{ url }` | Navigate to URL |
-| POST | `/eval` | `{ expression }` | Run JS in page context |
-| POST | `/click` | `{ selector }` | Click element by CSS selector |
-| POST | `/type` | `{ selector, text }` | Type into element |
-| POST | `/scroll` | `{ deltaX, deltaY, selector? }` | Scroll page or element |
-| GET | `/screenshot` | — | Base64 PNG screenshot |
-| GET | `/snapshot` | — | Accessibility tree |
-| GET | `/dom` | — | Full page outerHTML |
-| GET | `/console` | `?limit=N` | Buffered console output (last 200) |
-| GET | `/network` | `?limit=N&filter=x` | Buffered network requests (last 200) |
-| POST | `/network/clear` | — | Clear network log |
-| GET | `/url` | — | Current page URL |
-| GET | `/tabs` | — | List browser tabs |
-| POST | `/tabs/:id/activate` | — | Switch to a tab |
+| GET | `/status` | — | Bridge health + diagnostics (transport, active tab, buffer sizes, event counts) |
+| POST | `/navigate` | `{ url, tabId? }` | Navigate to URL |
+| POST | `/eval` | `{ expression, tabId? }` | Run JS in page context |
+| POST | `/click` | `{ selector, tabId? }` | Click element by CSS selector |
+| POST | `/type` | `{ selector, text, tabId? }` | Type into element |
+| POST | `/scroll` | `{ deltaX, deltaY, selector?, tabId? }` | Scroll page or element |
+| GET | `/screenshot` | `?tabId=X` | Base64 PNG screenshot |
+| GET | `/snapshot` | `?tabId=X` | Accessibility tree |
+| GET | `/dom` | `?tabId=X` | Full page outerHTML |
+| GET | `/console` | `?limit=N&tabId=X` | Buffered console output (last 200). Aggregates across tabs when `tabId` omitted. |
+| GET | `/network` | `?limit=N&filter=x&tabId=X` | Buffered network requests (last 200). Aggregates across tabs when `tabId` omitted. |
+| POST | `/network/clear` | `?tabId=X` | Clear network log (one tab or all) |
+| GET | `/url` | `?tabId=X` | Current page URL |
+| GET | `/tabs` | — | List open tabs `[{ tabId, url, title, active, state, transport }]` |
+| POST | `/tab/open` | `{ url, makeActive? }` | Open a new tab (proposed API only). Returns `{ tabId, url, title }` |
+| POST | `/tab/close/:tabId` | — | Close a tab |
+| POST | `/tab/activate/:tabId` | — | Set the active (default) tab |
 
 ## Multi-window support and port discovery
 
@@ -171,10 +182,22 @@ Check which path you're on via the status bar tooltip (`Browser MCP: Connected (
 
 Caveat: the `browser` proposal is still [tracked upstream](https://github.com/microsoft/vscode/issues/300319) and its shape can change between VS Code releases. The fallback path keeps the extension usable regardless.
 
+## Multi-tab
+
+Multi-tab support requires the proposed API (previous section). When enabled:
+
+- `browser_tab_open("https://example.com")` opens a new tab, returns its `tabId`.
+- `browser_tab_list()` shows all open tabs — the `active` flag marks which one receives commands by default.
+- Every interaction tool (`browser_navigate`, `browser_eval`, `browser_click`, etc.) accepts an optional `tabId`. Omit it to target the active tab; pass it to target a specific tab.
+- `browser_console` and `browser_network` aggregate across all tabs by default — each entry carries the `tabId` of the tab it came from. Pass `tabId` to filter.
+- Closing a tab in the VS Code UI is picked up automatically; the bridge untracks it and the `tabId` becomes invalid.
+
+On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
+
 ## Known limitations
 
 - On the debug-session path (without the proposed API flag): the browser runs as a VS Code debug session in `noDebug` mode. This means the debug toolbar and a "(1)" badge on the Run & Debug icon appear when the browser is active.
-- On the debug-session path: web worker and service worker events are not captured.
+- On the debug-session path: web worker and service worker events are not captured, and only one tab is supported.
 - `/eval` executes arbitrary JavaScript in whatever page is open. Use with care.
 - The browser tab opens in the VS Code editor area. It can be moved to a side panel or closed (which disconnects CDP).
 

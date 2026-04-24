@@ -1,673 +1,333 @@
 import * as vscode from 'vscode';
-import WebSocket from 'ws';
+import * as crypto from 'crypto';
+import { CDPTab, CDPState, ConsoleEntry, NetworkEntry } from './cdp-tab';
 
-export type CDPState = 'disconnected' | 'connecting' | 'connected';
+export { CDPState, ConsoleEntry, NetworkEntry };
 
-export interface ConsoleEntry {
-	type: string;
-	text: string;
-	timestamp: number;
-	/** Target type for entries originating in a child session (worker, iframe, service_worker). Absent for top-level page logs. */
-	target?: string;
-}
-
-export interface NetworkEntry {
-	requestId: string;
-	method: string;
+export interface TabInfo {
+	tabId: string;
+	/** 1-indexed display number matching the `①②③…` prefix in the tab title. Over 20 → null (tab shows `🤯`). */
+	number: number | null;
 	url: string;
-	status?: number;
-	statusText?: string;
-	type?: string;
-	timestamp: number;
-	responseTimestamp?: number;
-	/** Target type for entries originating in a child session (worker, iframe, service_worker). Absent for top-level requests. */
-	target?: string;
+	title: string;
+	active: boolean;
+	state: CDPState;
+	transport: 'websocket' | 'browserTab' | null;
 }
 
-interface ChildTargetInfo {
-	type: string;
-	url: string;
-	targetId: string;
+function generateTabId(): string {
+	return 'tab-' + crypto.randomBytes(4).toString('hex');
 }
 
-const CONSOLE_BUFFER_SIZE = 200;
-const NETWORK_BUFFER_SIZE = 200;
+/** 1..20 → ①..⑳, else 🤯 overflow marker. Always suffixed with a space. */
+function numberToPrefix(n: number): string {
+	const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+	if (n >= 1 && n <= 20) return CIRCLED[n - 1] + ' ';
+	return '🤯 ';
+}
 
-export class CDPConnection {
-	private ws: WebSocket | null = null;
-	private browserTabSession: vscode.BrowserCDPSession | null = null;
-	private browserTab: vscode.BrowserTab | null = null;
-	private browserTabDisposables: vscode.Disposable[] = [];
-	private requestId = 0;
-	private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-	private reconnectAttempts = 0;
-	private static readonly MAX_RECONNECT_ATTEMPTS = 5;
-	private static readonly BASE_RECONNECT_DELAY = 1000;
-	private _state: CDPState = 'disconnected';
+/**
+ * Owns a collection of {@link CDPTab}s and routes requests to the active or
+ * explicitly-specified tab.
+ *
+ * Multi-tab is only meaningful on the proposed `browser` API path
+ * (`openBrowserTab` + `BrowserTab.startCDPSession`). On the websocket /
+ * debug-session fallback path, the manager wraps a single synthetic
+ * `tab-main` and refuses multi-tab operations with a clear error.
+ */
+export class CDPManager {
+	private tabs = new Map<string, CDPTab>();
+	private _activeTabId: string | null = null;
+	private tabSubscriptions = new Map<string, vscode.Disposable>();
+	private log: vscode.OutputChannel;
 	private _onStateChange = new vscode.EventEmitter<CDPState>();
 	readonly onStateChange = this._onStateChange.event;
+	private _lastEmittedState: CDPState = 'disconnected';
 
-	private _sessionId: string | null = null;
-	private _session: vscode.DebugSession | null = null;
-	private _transport: 'websocket' | 'browserTab' | null = null;
+	/** Pick the lowest unused display number so new tabs reclaim gaps left by closed tabs. */
+	private allocateNumber(): number {
+		const used = new Set<number>();
+		for (const tab of this.tabs.values()) {
+			if (tab.displayNumber !== null) used.add(tab.displayNumber);
+		}
+		let n = 1;
+		while (used.has(n)) n++;
+		return n;
+	}
 
 	/**
-	 * CDP session ID for the primary page target. From VS Code 1.117 on, the
-	 * browser CDP proxy requires explicit `Target.attachToTarget` before page
-	 * commands / events work. All page-scoped `send()` calls are routed here
-	 * unless an explicit `sessionId` override is passed.
+	 * Dedupe concurrent `adoptBrowserTab` calls for the same underlying
+	 * {@link vscode.BrowserTab}. `openTab` calls `adoptBrowserTab`, and the
+	 * `onDidOpenBrowserTab` listener also does — without this cache they race,
+	 * and a caller can get back a CDPTab whose connect is still in flight,
+	 * causing `send()` to fail with "CDP not connected".
 	 */
-	private _pageSessionId: string | null = null;
-
-	/** CDP session ID for the browser-level handshake session. */
-	private _browserSessionId: string | null = null;
-
-	private consoleBuffer: ConsoleEntry[] = [];
-	private networkBuffer: NetworkEntry[] = [];
-	private networkMap = new Map<string, NetworkEntry>();
-	private childSessions = new Map<string, ChildTargetInfo>();
-	private eventCounts = new Map<string, number>();
-
-	private log: vscode.OutputChannel;
-	private disposed = false;
+	private pendingAdoptions = new Map<vscode.BrowserTab, Promise<CDPTab>>();
 
 	constructor(log: vscode.OutputChannel) {
 		this.log = log;
 	}
 
+	/** Aggregate state: `connected` if any tab is; `connecting` if any is; else `disconnected`. */
 	get state(): CDPState {
-		return this._state;
+		if (this.tabs.size === 0) return 'disconnected';
+		let sawConnecting = false;
+		for (const tab of this.tabs.values()) {
+			if (tab.state === 'connected') return 'connected';
+			if (tab.state === 'connecting') sawConnecting = true;
+		}
+		return sawConnecting ? 'connecting' : 'disconnected';
 	}
 
-	/** The debug session ID we're connected (or connecting) to. */
-	get sessionId(): string | null {
-		return this._sessionId;
+	/** Which transport all tabs are using (they all share one mode per session). */
+	get transport(): 'websocket' | 'browserTab' | null {
+		for (const tab of this.tabs.values()) {
+			if (tab.transport) return tab.transport;
+		}
+		return null;
 	}
 
-	/** Diagnostic: the CDP sessionId for the primary page target (or null). */
-	get pageSessionId(): string | null {
-		return this._pageSessionId;
+	get activeTabId(): string | null {
+		return this._activeTabId;
 	}
 
-	/** Diagnostic: list of tracked child sessions (workers/iframes). */
-	get children(): Array<{ sessionId: string; type: string; url: string }> {
-		return Array.from(this.childSessions.entries()).map(([sessionId, info]) => ({
-			sessionId,
-			type: info.type,
-			url: info.url,
+	get tabCount(): number {
+		return this.tabs.size;
+	}
+
+	/**
+	 * Resolve a tab. When `tabId` is omitted, returns the active tab, or the
+	 * only tab if there's exactly one, or `undefined`.
+	 */
+	getTab(tabId?: string): CDPTab | undefined {
+		if (tabId) return this.tabs.get(tabId);
+		if (this._activeTabId) return this.tabs.get(this._activeTabId);
+		if (this.tabs.size === 1) return this.tabs.values().next().value;
+		return undefined;
+	}
+
+	list(): TabInfo[] {
+		return Array.from(this.tabs.values()).map(tab => ({
+			tabId: tab.tabId,
+			number: tab.displayNumber,
+			url: tab.url,
+			title: tab.title,
+			active: tab.tabId === this._activeTabId,
+			state: tab.state,
+			transport: tab.transport,
 		}));
 	}
 
-	/** Diagnostic: CDP event method → count. */
-	get events(): Record<string, number> {
-		return Object.fromEntries(this.eventCounts);
+	/**
+	 * Open a new browser tab via the proposed API. Requires VS Code to be
+	 * launched with `--enable-proposed-api=thimo.integrated-browser-mcp`.
+	 *
+	 * Opens the tab at `about:blank` first and navigates afterward. That order
+	 * matters: the CDP handshake + proxy-level `Target.setAutoAttach` need to
+	 * complete before the destination page loads, otherwise a web worker
+	 * spawned on initial load can race our auto-attach and never get captured.
+	 */
+	async openTab(url: string, makeActive = true): Promise<CDPTab> {
+		if (typeof vscode.window.openBrowserTab !== 'function') {
+			throw new Error(
+				'Multi-tab requires VS Code to be launched with --enable-proposed-api=thimo.integrated-browser-mcp. See README.',
+			);
+		}
+		const browserTab = await vscode.window.openBrowserTab('about:blank', { preserveFocus: !makeActive });
+		const tab = await this.adoptBrowserTab(browserTab, makeActive);
+		if (url !== 'about:blank') {
+			await tab.send('Page.navigate', { url });
+		}
+		return tab;
 	}
 
-	/** Diagnostic: which transport is active. */
-	get transport(): 'websocket' | 'browserTab' | null {
-		return this._transport;
+	/**
+	 * Wrap an existing {@link vscode.BrowserTab} in a {@link CDPTab} and start
+	 * its CDP session. Idempotent: returns the existing wrapper if already
+	 * tracked. Called both for tabs we created via {@link openTab} and for
+	 * tabs the user opened via VS Code UI (via `onDidOpenBrowserTab`).
+	 */
+	async adoptBrowserTab(browserTab: vscode.BrowserTab, makeActive = false): Promise<CDPTab> {
+		// An in-flight adoption takes priority: a concurrent caller must wait
+		// for the connect + title-prefix to finish, not grab the half-built
+		// tab reference from the map.
+		const pending = this.pendingAdoptions.get(browserTab);
+		if (pending) return pending;
+		for (const tab of this.tabs.values()) {
+			if (tab.browserTab === browserTab) return tab;
+		}
+		const promise = (async () => {
+			const tab = new CDPTab(generateTabId(), this.log);
+			tab.displayNumber = this.allocateNumber();
+			this.registerTab(tab);
+			await tab.connectToBrowserTab(browserTab);
+			if (tab.displayNumber !== null) {
+				await tab.setTitlePrefix(numberToPrefix(tab.displayNumber));
+			}
+			if (makeActive || this.tabs.size === 1) this._activeTabId = tab.tabId;
+			this.emitStateChange();
+			return tab;
+		})();
+		this.pendingAdoptions.set(browserTab, promise);
+		promise.finally(() => this.pendingAdoptions.delete(browserTab));
+		return promise;
 	}
 
+	/**
+	 * Adopt a VS Code debug session (fallback path). Creates a single synthetic
+	 * tab with id `tab-main`.
+	 */
+	async adoptDebugSession(session: vscode.DebugSession): Promise<CDPTab> {
+		const existing = this.tabs.get('tab-main');
+		if (existing) return existing;
+		const tab = new CDPTab('tab-main', this.log);
+		tab.displayNumber = 1;
+		this.registerTab(tab);
+		await tab.connectToSession(session);
+		await tab.setTitlePrefix(numberToPrefix(1));
+		this._activeTabId = 'tab-main';
+		this.emitStateChange();
+		return tab;
+	}
+
+	private registerTab(tab: CDPTab): void {
+		this.tabs.set(tab.tabId, tab);
+		this.tabSubscriptions.set(tab.tabId, tab.onStateChange(() => this.emitStateChange()));
+	}
+
+	private emitStateChange(): void {
+		const current = this.state;
+		if (current !== this._lastEmittedState) {
+			this._lastEmittedState = current;
+			this._onStateChange.fire(current);
+		}
+	}
+
+	async closeTab(tabId: string): Promise<void> {
+		const tab = this.tabs.get(tabId);
+		if (!tab) throw new Error(`No tab: ${tabId}`);
+		// If it's a BrowserTab, close the VS Code tab too; lifecycle event will
+		// trigger untrack via onDidCloseBrowserTab. For the fallback path,
+		// just disconnect.
+		const underlying = tab.browserTab;
+		await tab.disconnect();
+		tab.dispose();
+		this.tabSubscriptions.get(tabId)?.dispose();
+		this.tabSubscriptions.delete(tabId);
+		this.tabs.delete(tabId);
+		if (this._activeTabId === tabId) {
+			this._activeTabId = this.tabs.size > 0 ? this.tabs.keys().next().value ?? null : null;
+		}
+		if (underlying) {
+			try { await underlying.close(); } catch { /* already closed */ }
+		}
+		this.emitStateChange();
+	}
+
+	/** Called when the user closes a browser tab via the VS Code UI. */
+	untrackBrowserTab(browserTab: vscode.BrowserTab): void {
+		for (const tab of this.tabs.values()) {
+			if (tab.browserTab === browserTab) {
+				tab.dispose();
+				this.tabSubscriptions.get(tab.tabId)?.dispose();
+				this.tabSubscriptions.delete(tab.tabId);
+				this.tabs.delete(tab.tabId);
+				if (this._activeTabId === tab.tabId) {
+					this._activeTabId = this.tabs.size > 0 ? this.tabs.keys().next().value ?? null : null;
+				}
+				this.emitStateChange();
+				return;
+			}
+		}
+	}
+
+	/** Sync internal active tab with `vscode.window.activeBrowserTab` events. */
+	syncActive(browserTab: vscode.BrowserTab | undefined): void {
+		if (!browserTab) return; // keep whatever we had
+		for (const tab of this.tabs.values()) {
+			if (tab.browserTab === browserTab) {
+				this._activeTabId = tab.tabId;
+				return;
+			}
+		}
+	}
+
+	activate(tabId: string): void {
+		if (!this.tabs.has(tabId)) throw new Error(`No tab: ${tabId}`);
+		this._activeTabId = tabId;
+	}
+
+	/** Aggregated across all tabs, stamped with originating tabId. */
 	get console(): ConsoleEntry[] {
-		return this.consoleBuffer;
+		const all: ConsoleEntry[] = [];
+		for (const tab of this.tabs.values()) {
+			for (const e of tab.console) all.push({ ...e, tabId: tab.tabId });
+		}
+		return all.sort((a, b) => a.timestamp - b.timestamp);
+	}
+
+	/** Per-tab console buffer (empty array if tab doesn't exist). */
+	consoleForTab(tabId: string): ConsoleEntry[] {
+		const tab = this.tabs.get(tabId);
+		if (!tab) return [];
+		return tab.console.map(e => ({ ...e, tabId }));
 	}
 
 	get network(): NetworkEntry[] {
-		return this.networkBuffer;
-	}
-
-	clearNetwork(): void {
-		this.networkBuffer = [];
-		this.networkMap.clear();
-	}
-
-	private setState(state: CDPState): void {
-		this._state = state;
-		this._onStateChange.fire(state);
-	}
-
-	async connectToSession(session: vscode.DebugSession): Promise<void> {
-		this.log.appendLine(`[CDP] connectToSession called (session: ${session.name}, id: ${session.id})`);
-		this._session = session;
-		this._sessionId = session.id;
-		this._transport = 'websocket';
-		this.setState('connecting');
-
-		try {
-			const proxy = await this.requestCDPProxy(session);
-			const wsUrl = `ws://${proxy.host}:${proxy.port}${proxy.path ?? ''}`;
-			this.log.appendLine(`[CDP] Connecting WebSocket to ${wsUrl}`);
-			await this.connectWebSocket(wsUrl);
-		} catch (err) {
-			this.log.appendLine(`[CDP] Failed to connect: ${err}`);
-			this.setState('disconnected');
-			this.scheduleReconnect();
+		const all: NetworkEntry[] = [];
+		for (const tab of this.tabs.values()) {
+			for (const e of tab.network) all.push({ ...e, tabId: tab.tabId });
 		}
+		return all.sort((a, b) => a.timestamp - b.timestamp);
 	}
 
-	/**
-	 * Connect via VS Code's proposed `browser` API (BrowserTab.startCDPSession).
-	 * This bypasses vscode-js-debug entirely, giving us direct access to the
-	 * multiplexed CDP stream. Events from all sessions (worker, iframe,
-	 * service_worker) flow without js-debug's sessionId-stripping subscribe
-	 * filter. Requires `--enable-proposed-api=thimo.integrated-browser-mcp`
-	 * when launching VS Code.
-	 */
-	async connectToBrowserTab(tab: vscode.BrowserTab): Promise<void> {
-		this.log.appendLine(`[CDP] connectToBrowserTab called (url: ${tab.url})`);
-		this.browserTab = tab;
-		this._transport = 'browserTab';
-		this.setState('connecting');
-
-		try {
-			const session = await tab.startCDPSession();
-			this.browserTabSession = session;
-			this.browserTabDisposables.push(
-				session.onDidReceiveMessage((msg: unknown) => {
-					this.handleMessage(msg as Record<string, unknown>);
-				}),
-				session.onDidClose(() => {
-					this.log.appendLine('[CDP] BrowserCDPSession closed');
-					this.browserTabSession = null;
-					this.pending.forEach(p => p.reject(new Error('Session closed')));
-					this.pending.clear();
-					if (!this.disposed) this.setState('disconnected');
-				}),
-			);
-			this.setState('connected');
-			this.log.appendLine('[CDP] BrowserCDPSession ready');
-			await this.establishPageSession();
-			await this.enableDomains();
-		} catch (err) {
-			this.log.appendLine(`[CDP] connectToBrowserTab failed: ${err}`);
-			this.setState('disconnected');
-		}
+	networkForTab(tabId: string): NetworkEntry[] {
+		const tab = this.tabs.get(tabId);
+		if (!tab) return [];
+		return tab.network.map(e => ({ ...e, tabId }));
 	}
 
-	private async requestCDPProxy(
-		session: vscode.DebugSession,
-	): Promise<{ host: string; port: number; path?: string }> {
-		// Must be called on a CHILD debug session (the page target), not the
-		// root launcher session. The root session has no CDP connection.
-		this.log.appendLine('[CDP] Requesting CDP proxy...');
-		const proxy = await Promise.race([
-			session.customRequest('requestCDPProxy'),
-			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error('requestCDPProxy timed out after 30s')), 30000),
-			),
-		]) as { host: string; port: number; path?: string };
-		this.log.appendLine(`[CDP] Got proxy: ${JSON.stringify(proxy)}`);
-		return proxy;
-	}
-
-	private connectWebSocket(url: string): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const ws = new WebSocket(url);
-			let settled = false;
-
-			ws.on('open', async () => {
-				this.ws = ws;
-				this.reconnectAttempts = 0;
-				this.setState('connected');
-				this.log.appendLine('[CDP] WebSocket connected');
-				settled = true;
-				try {
-					await this.subscribeToEvents();
-					await this.establishPageSession();
-					await this.enableDomains();
-				} catch (err) {
-					this.log.appendLine(`[CDP] Failed to enable domains: ${err}`);
-				}
-				resolve();
-			});
-
-			ws.on('message', (data) => {
-				try {
-					const msg = JSON.parse(data.toString());
-					this.handleMessage(msg);
-				} catch (err) {
-					this.log.appendLine(`[CDP] Message parse error: ${err}`);
-				}
-			});
-
-			ws.on('close', () => {
-				this.log.appendLine('[CDP] WebSocket closed');
-				this.ws = null;
-				this.pending.forEach(p => p.reject(new Error('WebSocket closed')));
-				this.pending.clear();
-				if (!this.disposed) {
-					this.setState('disconnected');
-					// Reconnect on unexpected mid-session drops
-					if (settled) {
-						this.scheduleReconnect();
-					}
-				}
-			});
-
-			ws.on('error', (err) => {
-				this.log.appendLine(`[CDP] WebSocket error: ${err.message}`);
-				if (!settled) {
-					settled = true;
-					reject(err);
-				}
-			});
-		});
-	}
-
-	private handleMessage(msg: Record<string, unknown>): void {
-		if (msg.id !== undefined) {
-			const p = this.pending.get(msg.id as number);
-			if (p) {
-				this.pending.delete(msg.id as number);
-				if (msg.error) {
-					p.reject(new Error((msg.error as { message: string }).message));
-				} else {
-					p.resolve(msg.result);
-				}
-			}
-		} else if (msg.method) {
-			this.handleEvent(
-				msg.method as string,
-				(msg.params ?? {}) as Record<string, unknown>,
-				msg.sessionId as string | undefined,
-			);
-		}
-	}
-
-	private titleScriptId: string | null = null;
-
-	private static readonly TITLE_SCRIPT = `
-		(function() {
-			var P = '\\u{25C9} ';
-			var updating = false;
-
-			function ensurePrefix() {
-				if (updating) return;
-				var el = document.querySelector('title');
-				if (!el) return;
-				if (!el.textContent.startsWith(P)) {
-					updating = true;
-					el.textContent = P + el.textContent;
-					updating = false;
-				}
-			}
-
-			// Watch for any title changes (HTML parsing, JS, SPA navigation)
-			new MutationObserver(ensurePrefix).observe(document, {
-				childList: true,
-				subtree: true,
-				characterData: true,
-			});
-
-			// Also intercept JS document.title setter
-			var og = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
-			if (og) {
-				Object.defineProperty(document, 'title', {
-					get: function() { return og.get.call(this); },
-					set: function(v) {
-						og.set.call(this, v.startsWith(P) ? v : P + v);
-					},
-					configurable: true,
-				});
-			}
-
-			ensurePrefix();
-		})();
-	`;
-
-	/**
-	 * vscode-js-debug's CDP proxy only forwards events the client has
-	 * subscribed to (via the synthetic `JsDebug.subscribe` domain). Without
-	 * this, no Runtime/Network/Target events reach our WebSocket — only
-	 * command responses. Supports `Domain.*` wildcards.
-	 * @see vscode-js-debug/src/adapter/cdpProxy.ts
-	 */
-	private async subscribeToEvents(): Promise<void> {
-		try {
-			await this.send('JsDebug.subscribe', {
-				events: ['Runtime.*', 'Network.*', 'Target.*', 'Page.*'],
-			}, { sessionId: null });
-			this.log.appendLine('[CDP] Subscribed to events (Runtime, Network, Target, Page)');
-		} catch (err) {
-			this.log.appendLine(`[CDP] JsDebug.subscribe failed (${err}); events may not flow`);
-		}
-	}
-
-	/**
-	 * In VS Code 1.117+, the browser CDP proxy requires an explicit attach
-	 * to the browser target before Target queries return page targets, and
-	 * page-scoped commands/events must carry the page session id. On older
-	 * versions the proxy auto-routed commands, so we gracefully fall back to
-	 * implicit routing if the handshake isn't supported.
-	 */
-	private async establishPageSession(): Promise<void> {
-		let browserSessionId: string | undefined;
-		try {
-			const r = await this.send('Target.attachToBrowserTarget', undefined, {
-				sessionId: null,
-			}) as { sessionId?: string };
-			browserSessionId = r.sessionId;
-		} catch (err) {
-			this.log.appendLine(`[CDP] attachToBrowserTarget failed (${err}); falling back to implicit routing`);
+	clearNetwork(tabId?: string): void {
+		if (tabId) {
+			this.tabs.get(tabId)?.clearNetwork();
 			return;
 		}
-		if (!browserSessionId) {
-			this.log.appendLine('[CDP] attachToBrowserTarget returned no sessionId');
-			return;
-		}
-		this._browserSessionId = browserSessionId;
-		// Scrub the browser session from childSessions in case its attachedToTarget
-		// event raced ahead of this assignment.
-		this.childSessions.delete(browserSessionId);
+		for (const tab of this.tabs.values()) tab.clearNetwork();
+	}
 
-		try {
-			const targetsResult = await this.send('Target.getTargets', undefined, {
-				sessionId: browserSessionId,
-			}) as { targetInfos?: Array<{ targetId: string; type: string; url?: string }> };
-			const pages = (targetsResult.targetInfos ?? []).filter(t => t.type === 'page');
-			if (pages.length === 0) {
-				this.log.appendLine('[CDP] No page target found');
-				return;
+	/** Aggregated child sessions across all tabs, stamped with tabId. */
+	get children(): Array<{ sessionId: string; type: string; url: string; tabId: string }> {
+		const all: Array<{ sessionId: string; type: string; url: string; tabId: string }> = [];
+		for (const tab of this.tabs.values()) {
+			for (const c of tab.children) all.push({ ...c, tabId: tab.tabId });
+		}
+		return all;
+	}
+
+	/** Aggregated event counts across all tabs. */
+	get events(): Record<string, number> {
+		const merged: Record<string, number> = {};
+		for (const tab of this.tabs.values()) {
+			for (const [method, count] of Object.entries(tab.events)) {
+				merged[method] = (merged[method] ?? 0) + count;
 			}
-			const page = pages[0];
-			const attachResult = await this.send('Target.attachToTarget', {
-				targetId: page.targetId,
-				flatten: true,
-			}, { sessionId: browserSessionId }) as { sessionId?: string };
-			if (attachResult.sessionId) {
-				this._pageSessionId = attachResult.sessionId;
-				// Same racing concern as the browser session above.
-				this.childSessions.delete(attachResult.sessionId);
-				this.log.appendLine(`[CDP] Attached to page session ${attachResult.sessionId} (${page.url ?? page.targetId})`);
-			} else {
-				this.log.appendLine('[CDP] Target.attachToTarget returned no sessionId');
-			}
-		} catch (err) {
-			this.log.appendLine(`[CDP] Page session bootstrap failed (${err})`);
 		}
+		return merged;
 	}
 
-	private async enableDomains(): Promise<void> {
-		await Promise.all([
-			this.send('Runtime.enable'),
-			this.send('Page.enable'),
-			this.send('Network.enable'),
-			this.send('DOM.enable'),
-			this.send('Accessibility.enable'),
-		]);
-		this.log.appendLine('[CDP] Domains enabled');
-		await this.installTitlePrefix();
-		await this.enableAutoAttach();
+	/** Diagnostic: pageSessionId of the active tab. */
+	get pageSessionId(): string | null {
+		return this.getTab()?.pageSessionId ?? null;
 	}
 
-	/**
-	 * Enable the browser CDP proxy's auto-attach so worker/iframe targets
-	 * registered by VS Code's browserViewGroup are attached automatically.
-	 * Sent at browser/root level (sessionId: null) — that sets the proxy's
-	 * internal `_autoAttach` flag. Per-session setAutoAttach wouldn't help
-	 * because child sessions created via CDP auto-attach bypass the proxy's
-	 * session map.
-	 */
-	private async enableAutoAttach(): Promise<void> {
-		try {
-			await this.send('Target.setAutoAttach', {
-				autoAttach: true,
-				waitForDebuggerOnStart: false,
-				flatten: true,
-			}, { sessionId: null });
-			this.log.appendLine('[CDP] Auto-attach enabled');
-		} catch (err) {
-			this.log.appendLine(`[CDP] setAutoAttach not supported (${err}); child sessions will not be captured`);
+	async dispose(): Promise<void> {
+		for (const tab of this.tabs.values()) {
+			tab.dispose();
 		}
-	}
-
-	private async installTitlePrefix(): Promise<void> {
-		try {
-			// Inject on every future page load
-			const result = await this.send('Page.addScriptToEvaluateOnNewDocument', {
-				source: CDPConnection.TITLE_SCRIPT,
-			}) as { identifier: string };
-			this.titleScriptId = result.identifier;
-			this.log.appendLine(`[CDP] Title prefix script installed (id: ${this.titleScriptId})`);
-
-			// Also apply to the current page immediately
-			await this.send('Runtime.evaluate', {
-				expression: CDPConnection.TITLE_SCRIPT,
-			});
-			this.log.appendLine('[CDP] Title prefix applied to current page');
-		} catch (err) {
-			this.log.appendLine(`[CDP] Failed to install title prefix: ${err}`);
-		}
-	}
-
-	private async removeTitlePrefix(): Promise<void> {
-		try {
-			if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-				if (this.titleScriptId) {
-					await this.send('Page.removeScriptToEvaluateOnNewDocument', {
-						identifier: this.titleScriptId,
-					}).catch(() => {});
-					this.titleScriptId = null;
-				}
-				await this.send('Runtime.evaluate', {
-					expression: `
-						(function() {
-							var P = '\\u{25C9} ';
-							delete document.title;
-							var og = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
-							if (og && og.get.call(document).startsWith(P)) {
-								og.set.call(document, og.get.call(document).slice(P.length));
-							}
-						})();
-					`,
-				}, { timeoutMs: 2000 });
-			}
-		} catch {
-			// Best-effort cleanup
-		}
-	}
-
-	private handleEvent(method: string, params: Record<string, unknown>, sessionId?: string): void {
-		this.eventCounts.set(method, (this.eventCounts.get(method) ?? 0) + 1);
-		switch (method) {
-			case 'Runtime.consoleAPICalled':
-				this.onConsole(params, sessionId);
-				break;
-			case 'Network.requestWillBeSent':
-				this.onNetworkRequest(params, sessionId);
-				break;
-			case 'Network.responseReceived':
-				this.onNetworkResponse(params);
-				break;
-			case 'Target.attachedToTarget':
-				this.onTargetAttached(params);
-				break;
-			case 'Target.detachedFromTarget':
-				this.onTargetDetached(params);
-				break;
-		}
-	}
-
-	private onTargetAttached(params: Record<string, unknown>): void {
-		const sessionId = params.sessionId as string | undefined;
-		const targetInfo = params.targetInfo as { type: string; url: string; targetId: string } | undefined;
-		if (!sessionId || !targetInfo) return;
-		// Skip our own handshake sessions — they aren't children to tag.
-		if (sessionId === this._pageSessionId || sessionId === this._browserSessionId) return;
-		this.childSessions.set(sessionId, {
-			type: targetInfo.type,
-			url: targetInfo.url,
-			targetId: targetInfo.targetId,
-		});
-		this.log.appendLine(`[CDP] Child session attached: ${targetInfo.type} (${targetInfo.url || targetInfo.targetId})`);
-		// Enable Runtime + Network on the child so its events flow through.
-		// Browser-level targets can't enable Network; skip those.
-		this.send('Runtime.enable', undefined, { sessionId }).catch(err => {
-			this.log.appendLine(`[CDP] Runtime.enable failed for ${targetInfo.type}: ${err}`);
-		});
-		if (targetInfo.type !== 'browser') {
-			this.send('Network.enable', undefined, { sessionId }).catch(err => {
-				this.log.appendLine(`[CDP] Network.enable failed for ${targetInfo.type}: ${err}`);
-			});
-		}
-	}
-
-	private onTargetDetached(params: Record<string, unknown>): void {
-		const sessionId = params.sessionId as string | undefined;
-		if (!sessionId) return;
-		const info = this.childSessions.get(sessionId);
-		if (info) {
-			this.log.appendLine(`[CDP] Child session detached: ${info.type}`);
-			this.childSessions.delete(sessionId);
-		}
-	}
-
-	private onConsole(params: Record<string, unknown>, sessionId?: string): void {
-		const args = params.args as Array<{ type: string; value?: unknown; description?: string }> | undefined;
-		const text = args
-			? args.map(a => a.value !== undefined ? String(a.value) : a.description ?? '').join(' ')
-			: '';
-		const entry: ConsoleEntry = {
-			type: params.type as string,
-			text,
-			timestamp: Date.now(),
-		};
-		const target = sessionId ? this.childSessions.get(sessionId)?.type : undefined;
-		if (target) entry.target = target;
-		this.consoleBuffer.push(entry);
-		if (this.consoleBuffer.length > CONSOLE_BUFFER_SIZE) {
-			this.consoleBuffer.shift();
-		}
-	}
-
-	private onNetworkRequest(params: Record<string, unknown>, sessionId?: string): void {
-		const request = params.request as { method: string; url: string } | undefined;
-		if (!request) return;
-		const entry: NetworkEntry = {
-			requestId: params.requestId as string,
-			method: request.method,
-			url: request.url,
-			type: params.type as string | undefined,
-			timestamp: Date.now(),
-		};
-		const target = sessionId ? this.childSessions.get(sessionId)?.type : undefined;
-		if (target) entry.target = target;
-		this.networkMap.set(entry.requestId, entry);
-		this.networkBuffer.push(entry);
-		if (this.networkBuffer.length > NETWORK_BUFFER_SIZE) {
-			const removed = this.networkBuffer.shift()!;
-			this.networkMap.delete(removed.requestId);
-		}
-	}
-
-	private onNetworkResponse(params: Record<string, unknown>): void {
-		const entry = this.networkMap.get(params.requestId as string);
-		if (!entry) return;
-		const response = params.response as { status: number; statusText: string } | undefined;
-		if (response) {
-			entry.status = response.status;
-			entry.statusText = response.statusText;
-			entry.responseTimestamp = Date.now();
-		}
-	}
-
-	/**
-	 * Send a CDP command. By default routes to the primary page session
-	 * (`_pageSessionId`). Pass `opts.sessionId` as:
-	 *   - a string: explicit session id (e.g. a worker/iframe child).
-	 *   - `null`: no sessionId in envelope; the proxy handles it at browser/root level
-	 *     (needed for Browser.* / Target.* commands during session bootstrap).
-	 *   - omitted / undefined: fall through to `_pageSessionId` if known.
-	 */
-	send(
-		method: string,
-		params?: Record<string, unknown>,
-		opts: { sessionId?: string | null; timeoutMs?: number } = {},
-	): Promise<unknown> {
-		const timeoutMs = opts.timeoutMs ?? 30000;
-		return new Promise((resolve, reject) => {
-			const wsOpen = this.ws && this.ws.readyState === WebSocket.OPEN;
-			const tabOpen = this.browserTabSession !== null;
-			if (!wsOpen && !tabOpen) {
-				reject(new Error('CDP not connected'));
-				return;
-			}
-			const id = ++this.requestId;
-			const timer = setTimeout(() => {
-				this.pending.delete(id);
-				reject(new Error(`CDP request timed out after ${timeoutMs}ms: ${method}`));
-			}, timeoutMs);
-			this.pending.set(id, {
-				resolve: (v) => { clearTimeout(timer); resolve(v); },
-				reject: (e) => { clearTimeout(timer); reject(e); },
-			});
-			const envelope: Record<string, unknown> = { id, method, params };
-			const sessionId = opts.sessionId === undefined ? this._pageSessionId : opts.sessionId;
-			if (sessionId) envelope.sessionId = sessionId;
-			if (this.browserTabSession) {
-				this.browserTabSession.sendMessage(envelope).then(undefined, (err: Error) => {
-					this.pending.delete(id);
-					clearTimeout(timer);
-					reject(err);
-				});
-			} else {
-				this.ws!.send(JSON.stringify(envelope));
-			}
-		});
-	}
-
-	private scheduleReconnect(): void {
-		if (this.disposed || this.reconnectTimer || !this._session) return;
-		if (this.reconnectAttempts >= CDPConnection.MAX_RECONNECT_ATTEMPTS) {
-			this.log.appendLine(`[CDP] Max reconnect attempts (${CDPConnection.MAX_RECONNECT_ATTEMPTS}) reached, giving up`);
-			this._session = null;
-			this._sessionId = null;
-			return;
-		}
-		const delay = CDPConnection.BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts);
-		this.reconnectAttempts++;
-		const session = this._session;
-		this.log.appendLine(`[CDP] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${CDPConnection.MAX_RECONNECT_ATTEMPTS})`);
-		this.reconnectTimer = setTimeout(() => {
-			this.reconnectTimer = null;
-			if (!this.disposed && this._state === 'disconnected' && this._session === session) {
-				this.connectToSession(session);
-			}
-		}, delay);
-	}
-
-	async disconnect(): Promise<void> {
-		if (this.reconnectTimer) {
-			clearTimeout(this.reconnectTimer);
-			this.reconnectTimer = null;
-		}
-		this._session = null;
-		this._sessionId = null;
-		this._pageSessionId = null;
-		this._browserSessionId = null;
-		this._transport = null;
-		await this.removeTitlePrefix();
-		if (this.ws) {
-			this.ws.close();
-			this.ws = null;
-		}
-		this.browserTabDisposables.forEach(d => d.dispose());
-		this.browserTabDisposables = [];
-		if (this.browserTabSession) {
-			try { await this.browserTabSession.close(); } catch { /* best effort */ }
-			this.browserTabSession = null;
-		}
-		this.browserTab = null;
-		this.pending.forEach(p => p.reject(new Error('Disconnected')));
-		this.pending.clear();
-		this.childSessions.clear();
-		this.setState('disconnected');
-	}
-
-	dispose(): void {
-		this.disposed = true;
-		this.disconnect();
+		this.tabs.clear();
+		this.tabSubscriptions.forEach(s => s.dispose());
+		this.tabSubscriptions.clear();
+		this._activeTabId = null;
 		this._onStateChange.dispose();
 	}
 }

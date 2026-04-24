@@ -125,28 +125,39 @@ const server = new McpServer({
 	version: '0.0.1',
 });
 
+const tabIdDescription = 'Optional browser tab id (e.g. "tab-ab12cd"). Omit to use the active tab. Use browser_tab_list to see tab ids.';
+
 // Navigate
 server.tool(
 	'browser_navigate',
-	'Navigate the browser to a URL',
-	{ url: z.string().describe('The URL to navigate to') },
-	async ({ url }) => toMcpResult(await bridgePost('/navigate', { url })),
+	'Navigate the browser to a URL. Replaces the current page of the target tab.',
+	{
+		url: z.string().describe('The URL to navigate to'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ url, tabId }) => toMcpResult(await bridgePost('/navigate', { url, tabId })),
 );
 
 // Eval
 server.tool(
 	'browser_eval',
 	'Execute JavaScript in the browser page. WARNING: runs arbitrary code in whatever page is open.',
-	{ expression: z.string().describe('JavaScript expression to evaluate') },
-	async ({ expression }) => toMcpResult(await bridgePost('/eval', { expression })),
+	{
+		expression: z.string().describe('JavaScript expression to evaluate'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ expression, tabId }) => toMcpResult(await bridgePost('/eval', { expression, tabId })),
 );
 
 // Click
 server.tool(
 	'browser_click',
 	'Click an element by CSS selector',
-	{ selector: z.string().describe('CSS selector of the element to click') },
-	async ({ selector }) => toMcpResult(await bridgePost('/click', { selector })),
+	{
+		selector: z.string().describe('CSS selector of the element to click'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ selector, tabId }) => toMcpResult(await bridgePost('/click', { selector, tabId })),
 );
 
 // Type
@@ -156,8 +167,9 @@ server.tool(
 	{
 		selector: z.string().describe('CSS selector of the input element'),
 		text: z.string().describe('Text to type'),
+		tabId: z.string().optional().describe(tabIdDescription),
 	},
-	async ({ selector, text }) => toMcpResult(await bridgePost('/type', { selector, text })),
+	async ({ selector, text, tabId }) => toMcpResult(await bridgePost('/type', { selector, text, tabId })),
 );
 
 // Scroll
@@ -168,17 +180,19 @@ server.tool(
 		deltaX: z.number().default(0).describe('Horizontal scroll amount in pixels'),
 		deltaY: z.number().default(0).describe('Vertical scroll amount in pixels'),
 		selector: z.string().optional().describe('CSS selector of element to scroll (default: window)'),
+		tabId: z.string().optional().describe(tabIdDescription),
 	},
-	async ({ deltaX, deltaY, selector }) => toMcpResult(await bridgePost('/scroll', { deltaX, deltaY, selector })),
+	async ({ deltaX, deltaY, selector, tabId }) => toMcpResult(await bridgePost('/scroll', { deltaX, deltaY, selector, tabId })),
 );
 
 // Screenshot
 server.tool(
 	'browser_screenshot',
 	'Take a screenshot of the current page (returns base64 PNG)',
-	{},
-	async () => {
-		const result = await bridgeFetch('/screenshot');
+	{ tabId: z.string().optional().describe(tabIdDescription) },
+	async ({ tabId }) => {
+		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
+		const result = await bridgeFetch(`/screenshot${qs}`);
 		if (!result.ok) {
 			return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
 		}
@@ -196,37 +210,52 @@ server.tool(
 server.tool(
 	'browser_snapshot',
 	'Get the accessibility tree of the current page (useful for understanding page structure)',
-	{},
-	async () => toMcpResult(await bridgeFetch('/snapshot')),
+	{ tabId: z.string().optional().describe(tabIdDescription) },
+	async ({ tabId }) => {
+		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
+		return toMcpResult(await bridgeFetch(`/snapshot${qs}`));
+	},
 );
 
 // DOM
 server.tool(
 	'browser_dom',
 	'Get the full outer HTML of the current page',
-	{},
-	async () => toMcpResult(await bridgeFetch('/dom')),
+	{ tabId: z.string().optional().describe(tabIdDescription) },
+	async ({ tabId }) => {
+		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
+		return toMcpResult(await bridgeFetch(`/dom${qs}`));
+	},
 );
 
 // Console
 server.tool(
 	'browser_console',
-	'Read buffered console output from the browser',
-	{ limit: z.number().int().min(1).max(200).default(50).describe('Max entries to return') },
-	async ({ limit }) => toMcpResult(await bridgeFetch(`/console?limit=${limit}`)),
+	'Read buffered console output from the browser. Without tabId, aggregates entries across all tabs (each entry includes its originating tabId).',
+	{
+		limit: z.number().int().min(1).max(200).default(50).describe('Max entries to return'),
+		tabId: z.string().optional().describe('Filter to one tab. Omit to aggregate across all tabs.'),
+	},
+	async ({ limit, tabId }) => {
+		const params = new URLSearchParams({ limit: String(limit) });
+		if (tabId) params.set('tabId', tabId);
+		return toMcpResult(await bridgeFetch(`/console?${params}`));
+	},
 );
 
 // Network
 server.tool(
 	'browser_network',
-	'Read buffered network requests from the browser',
+	'Read buffered network requests from the browser. Without tabId, aggregates across all tabs.',
 	{
 		limit: z.number().int().min(1).max(200).default(50).describe('Max entries to return'),
 		filter: z.string().optional().describe('Filter URLs containing this string'),
+		tabId: z.string().optional().describe('Filter to one tab. Omit to aggregate across all tabs.'),
 	},
-	async ({ limit, filter }) => {
+	async ({ limit, filter, tabId }) => {
 		const params = new URLSearchParams({ limit: String(limit) });
 		if (filter) params.set('filter', filter);
+		if (tabId) params.set('tabId', tabId);
 		return toMcpResult(await bridgeFetch(`/network?${params}`));
 	},
 );
@@ -235,16 +264,22 @@ server.tool(
 server.tool(
 	'browser_network_clear',
 	'Clear the buffered network request log',
-	{},
-	async () => toMcpResult(await bridgeFetch('/network/clear', { method: 'POST' })),
+	{ tabId: z.string().optional().describe('Clear one tab only. Omit to clear all tabs.') },
+	async ({ tabId }) => {
+		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
+		return toMcpResult(await bridgeFetch(`/network/clear${qs}`, { method: 'POST' }));
+	},
 );
 
 // URL
 server.tool(
 	'browser_url',
 	'Get the current page URL',
-	{},
-	async () => toMcpResult(await bridgeFetch('/url')),
+	{ tabId: z.string().optional().describe(tabIdDescription) },
+	async ({ tabId }) => {
+		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
+		return toMcpResult(await bridgeFetch(`/url${qs}`));
+	},
 );
 
 // Status
@@ -253,6 +288,41 @@ server.tool(
 	'Check the bridge connection status',
 	{},
 	async () => toMcpResult(await bridgeFetch('/status')),
+);
+
+// Tab management — requires proposed browser API on the extension side.
+// On the fallback (debug-session) path, browser_tab_open returns an error;
+// browser_tab_list still works (returns the single synthetic tab).
+
+server.tool(
+	'browser_tab_open',
+	'Open a new browser tab. Requires VS Code to be launched with --enable-proposed-api=thimo.integrated-browser-mcp; otherwise returns an error. Returns the new tabId.',
+	{
+		url: z.string().describe('Initial URL for the new tab'),
+		makeActive: z.boolean().optional().default(true).describe('Make this tab the active (default) target for subsequent tool calls'),
+	},
+	async ({ url, makeActive }) => toMcpResult(await bridgePost('/tab/open', { url, makeActive })),
+);
+
+server.tool(
+	'browser_tab_close',
+	'Close a browser tab by id.',
+	{ tabId: z.string().describe('Tab id from browser_tab_list / browser_tab_open') },
+	async ({ tabId }) => toMcpResult(await bridgePost(`/tab/close/${encodeURIComponent(tabId)}`, {})),
+);
+
+server.tool(
+	'browser_tab_list',
+	'List all open browser tabs under the bridge, with id/url/title and which is active.',
+	{},
+	async () => toMcpResult(await bridgeFetch('/tabs')),
+);
+
+server.tool(
+	'browser_tab_activate',
+	'Set the default target tab for subsequent tool calls that omit tabId. Note: does not move focus in the VS Code UI (not exposed by the proposed API).',
+	{ tabId: z.string().describe('Tab id to activate') },
+	async ({ tabId }) => toMcpResult(await bridgePost(`/tab/activate/${encodeURIComponent(tabId)}`, {})),
 );
 
 async function main() {

@@ -12,20 +12,28 @@ export class StatusBar {
 		this.item.show();
 	}
 
-	update(cdpState: CDPState, serverRunning: boolean, transport?: 'websocket' | 'browserTab' | null): void {
+	update(
+		cdpState: CDPState,
+		serverRunning: boolean,
+		transport?: 'websocket' | 'browserTab' | null,
+		tabs: { count: number; activeUrl?: string } = { count: 0 },
+	): void {
 		if (cdpState === 'connected') this.everConnected = true;
 
 		const transportTag = transport === 'browserTab' ? ' (proposed)'
 			: transport === 'websocket' ? ' (debug-session)'
 			: '';
+		const countSuffix = tabs.count > 1 ? ` (${tabs.count})` : '';
+		const activeUrlLine = tabs.activeUrl ? `\nActive: ${tabs.activeUrl}` : '';
+		const tabLine = tabs.count > 1 ? `\n${tabs.count} tabs open` : '';
 
 		if (!serverRunning) {
 			this.item.text = '$(circle-slash) Browser MCP';
 			this.item.tooltip = 'Browser MCP: Off';
 			this.item.backgroundColor = undefined;
 		} else if (cdpState === 'connected') {
-			this.item.text = '$(broadcast) Browser MCP';
-			this.item.tooltip = `Browser MCP: Connected${transportTag}`;
+			this.item.text = `$(broadcast) Browser MCP${countSuffix}`;
+			this.item.tooltip = `Browser MCP: Connected${transportTag}${activeUrlLine}${tabLine}`;
 			this.item.backgroundColor = undefined;
 		} else if (cdpState === 'connecting') {
 			this.item.text = '$(sync~spin) Browser MCP';

@@ -1,16 +1,17 @@
 import * as http from 'http';
 import express from 'express';
-import type { CDPConnection } from './cdp';
+import type { CDPManager } from './cdp';
+import type { CDPTab } from './cdp-tab';
 import type * as vscode from 'vscode';
 
 export class BridgeServer {
 	private app: express.Application;
 	private server: http.Server | null = null;
-	private cdp: CDPConnection;
+	private cdp: CDPManager;
 	private log: vscode.OutputChannel;
-	private ensureBrowser: (() => Promise<void>) | null = null;
+	private ensureBrowser: ((url?: string) => Promise<void>) | null = null;
 
-	constructor(cdp: CDPConnection, log: vscode.OutputChannel) {
+	constructor(cdp: CDPManager, log: vscode.OutputChannel) {
 		this.cdp = cdp;
 		this.log = log;
 		this.app = express();
@@ -18,16 +19,22 @@ export class BridgeServer {
 		this.setupRoutes();
 	}
 
-	setEnsureBrowser(fn: () => Promise<void>): void {
+	setEnsureBrowser(fn: (url?: string) => Promise<void>): void {
 		this.ensureBrowser = fn;
 	}
 
-	private requireCDP(): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
+	/**
+	 * Middleware that ensures at least one tab exists. If none exist, lazy-launches
+	 * a browser. For `/navigate` (which has a URL), the launch navigates directly
+	 * to the target; other endpoints get about:blank. Errors out if still no tab
+	 * after the launch attempt.
+	 */
+	private requireAnyTab(lazyUrl?: (req: express.Request) => string | undefined): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
 		return (req, res, next) => {
 			const run = async () => {
-				if (this.cdp.state !== 'connected' && this.ensureBrowser) {
-					this.log.appendLine('[HTTP] CDP not connected, launching browser...');
-					await this.ensureBrowser();
+				if (this.cdp.tabCount === 0 && this.ensureBrowser) {
+					this.log.appendLine('[HTTP] No tabs, launching browser...');
+					await this.ensureBrowser(lazyUrl?.(req));
 				}
 				if (this.cdp.state !== 'connected') {
 					res.json({ ok: false, error: 'CDP not connected' });
@@ -42,10 +49,21 @@ export class BridgeServer {
 		};
 	}
 
-	private setupRoutes(): void {
-		const cdpGuard = this.requireCDP();
+	/** Resolve the target tab for a request (query `?tabId=` or body `tabId`). */
+	private resolveTab(req: express.Request): { tab?: CDPTab; error?: string } {
+		const tabId = (req.query.tabId as string | undefined) ?? (req.body?.tabId as string | undefined);
+		const tab = this.cdp.getTab(tabId);
+		if (!tab) {
+			return { error: tabId ? `No tab with id ${tabId}` : 'No active tab. Use browser_tab_open first.' };
+		}
+		return { tab };
+	}
 
-		// Health
+	private setupRoutes(): void {
+		const anyTab = this.requireAnyTab();
+		const anyTabLazyNavigate = this.requireAnyTab(req => req.body?.url as string | undefined);
+
+		// Health / diagnostic
 		this.app.get('/status', (_req, res) => {
 			res.json({
 				ok: true,
@@ -53,6 +71,8 @@ export class BridgeServer {
 					cdp: this.cdp.state,
 					server: true,
 					transport: this.cdp.transport,
+					activeTabId: this.cdp.activeTabId,
+					tabCount: this.cdp.tabCount,
 					pageSessionId: this.cdp.pageSessionId,
 					children: this.cdp.children,
 					consoleBufferSize: this.cdp.console.length,
@@ -62,15 +82,55 @@ export class BridgeServer {
 			});
 		});
 
+		// Tab management
+		this.app.get('/tabs', (_req, res) => {
+			res.json({ ok: true, data: this.cdp.list() });
+		});
+
+		this.app.post('/tab/open', async (req, res) => {
+			try {
+				const url = req.body.url;
+				const makeActive = req.body.makeActive !== false;
+				if (!url) {
+					res.json({ ok: false, error: 'Missing url' });
+					return;
+				}
+				const tab = await this.cdp.openTab(url, makeActive);
+				res.json({ ok: true, data: { tabId: tab.tabId, url: tab.url, title: tab.title } });
+			} catch (err) {
+				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+			}
+		});
+
+		this.app.post('/tab/close/:tabId', async (req, res) => {
+			try {
+				await this.cdp.closeTab(req.params.tabId);
+				res.json({ ok: true, data: { closed: req.params.tabId } });
+			} catch (err) {
+				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+			}
+		});
+
+		this.app.post('/tab/activate/:tabId', (req, res) => {
+			try {
+				this.cdp.activate(req.params.tabId);
+				res.json({ ok: true, data: { active: req.params.tabId } });
+			} catch (err) {
+				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+			}
+		});
+
 		// Navigation
-		this.app.post('/navigate', cdpGuard, async (req, res) => {
+		this.app.post('/navigate', anyTabLazyNavigate, async (req, res) => {
 			try {
 				const { url } = req.body;
 				if (!url) {
 					res.json({ ok: false, error: 'Missing url' });
 					return;
 				}
-				const result = await this.cdp.send('Page.navigate', { url });
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const result = await resolved.tab.send('Page.navigate', { url });
 				res.json({ ok: true, data: result });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
@@ -78,14 +138,16 @@ export class BridgeServer {
 		});
 
 		// Eval
-		this.app.post('/eval', cdpGuard, async (req, res) => {
+		this.app.post('/eval', anyTab, async (req, res) => {
 			try {
 				const { expression } = req.body;
 				if (!expression) {
 					res.json({ ok: false, error: 'Missing expression' });
 					return;
 				}
-				const result = await this.cdp.send('Runtime.evaluate', {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const result = await resolved.tab.send('Runtime.evaluate', {
 					expression,
 					returnByValue: true,
 					awaitPromise: true,
@@ -101,16 +163,17 @@ export class BridgeServer {
 		});
 
 		// Click
-		this.app.post('/click', cdpGuard, async (req, res) => {
+		this.app.post('/click', anyTab, async (req, res) => {
 			try {
 				const { selector } = req.body;
 				if (!selector) {
 					res.json({ ok: false, error: 'Missing selector' });
 					return;
 				}
-				// Use Runtime.evaluate to find and click the element
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
 				const selectorJson = JSON.stringify(selector);
-				const result = await this.cdp.send('Runtime.evaluate', {
+				const result = await resolved.tab.send('Runtime.evaluate', {
 					expression: `(() => {
 						const sel = ${selectorJson};
 						const el = document.querySelector(sel);
@@ -133,16 +196,17 @@ export class BridgeServer {
 		});
 
 		// Type
-		this.app.post('/type', cdpGuard, async (req, res) => {
+		this.app.post('/type', anyTab, async (req, res) => {
 			try {
 				const { selector, text } = req.body;
 				if (!selector || text === undefined) {
 					res.json({ ok: false, error: 'Missing selector or text' });
 					return;
 				}
-				// Focus the element
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
 				const selectorJson = JSON.stringify(selector);
-				const focusResult = await this.cdp.send('Runtime.evaluate', {
+				const focusResult = await resolved.tab.send('Runtime.evaluate', {
 					expression: `(() => {
 						const sel = ${selectorJson};
 						const el = document.querySelector(sel);
@@ -157,10 +221,7 @@ export class BridgeServer {
 					res.json({ ok: false, error: focusResult.result.value.error });
 					return;
 				}
-				// Use Input.insertText which dispatches beforeinput/input events
-				// that React and other frameworks listen to (keyDown/keyUp alone
-				// does not update controlled inputs).
-				await this.cdp.send('Input.insertText', { text });
+				await resolved.tab.send('Input.insertText', { text });
 				res.json({ ok: true, data: { typed: text.length } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
@@ -168,18 +229,20 @@ export class BridgeServer {
 		});
 
 		// Scroll
-		this.app.post('/scroll', cdpGuard, async (req, res) => {
+		this.app.post('/scroll', anyTab, async (req, res) => {
 			try {
 				const deltaX = Number(req.body.deltaX) || 0;
 				const deltaY = Number(req.body.deltaY) || 0;
 				const { selector } = req.body;
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
 				if (selector) {
-					await this.cdp.send('Runtime.evaluate', {
+					await resolved.tab.send('Runtime.evaluate', {
 						expression: `document.querySelector(${JSON.stringify(selector)})?.scrollBy(${deltaX}, ${deltaY})`,
 						returnByValue: true,
 					});
 				} else {
-					await this.cdp.send('Runtime.evaluate', {
+					await resolved.tab.send('Runtime.evaluate', {
 						expression: `window.scrollBy(${deltaX}, ${deltaY})`,
 						returnByValue: true,
 					});
@@ -191,9 +254,11 @@ export class BridgeServer {
 		});
 
 		// Screenshot
-		this.app.get('/screenshot', cdpGuard, async (_req, res) => {
+		this.app.get('/screenshot', anyTab, async (req, res) => {
 			try {
-				const result = await this.cdp.send('Page.captureScreenshot', {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const result = await resolved.tab.send('Page.captureScreenshot', {
 					format: 'png',
 				}) as { data: string };
 				res.json({ ok: true, data: result.data });
@@ -203,9 +268,11 @@ export class BridgeServer {
 		});
 
 		// Accessibility snapshot
-		this.app.get('/snapshot', cdpGuard, async (_req, res) => {
+		this.app.get('/snapshot', anyTab, async (req, res) => {
 			try {
-				const result = await this.cdp.send('Accessibility.getFullAXTree') as { nodes: unknown[] };
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const result = await resolved.tab.send('Accessibility.getFullAXTree') as { nodes: unknown[] };
 				res.json({ ok: true, data: result.nodes });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
@@ -213,9 +280,11 @@ export class BridgeServer {
 		});
 
 		// DOM
-		this.app.get('/dom', cdpGuard, async (_req, res) => {
+		this.app.get('/dom', anyTab, async (req, res) => {
 			try {
-				const result = await this.cdp.send('Runtime.evaluate', {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const result = await resolved.tab.send('Runtime.evaluate', {
 					expression: 'document.documentElement.outerHTML',
 					returnByValue: true,
 				}) as { result: { value?: string } };
@@ -225,57 +294,42 @@ export class BridgeServer {
 			}
 		});
 
-		// Console
+		// Console — filter by tabId when provided, aggregated otherwise
 		this.app.get('/console', (req, res) => {
 			const limit = parseInt(req.query.limit as string) || 50;
-			const entries = this.cdp.console.slice(-limit);
-			res.json({ ok: true, data: entries });
+			const tabId = req.query.tabId as string | undefined;
+			const entries = tabId ? this.cdp.consoleForTab(tabId) : this.cdp.console;
+			res.json({ ok: true, data: entries.slice(-limit) });
 		});
 
-		// Network
+		// Network — filter by tabId when provided, aggregated otherwise
 		this.app.get('/network', (req, res) => {
 			const limit = parseInt(req.query.limit as string) || 50;
+			const tabId = req.query.tabId as string | undefined;
 			const filter = req.query.filter as string | undefined;
-			let entries = this.cdp.network;
+			let entries = tabId ? this.cdp.networkForTab(tabId) : this.cdp.network;
 			if (filter) {
 				entries = entries.filter(e => e.url.includes(filter));
 			}
 			res.json({ ok: true, data: entries.slice(-limit) });
 		});
 
-		this.app.post('/network/clear', (_req, res) => {
-			this.cdp.clearNetwork();
-			res.json({ ok: true, data: { cleared: true } });
+		this.app.post('/network/clear', (req, res) => {
+			const tabId = req.query.tabId as string | undefined;
+			this.cdp.clearNetwork(tabId);
+			res.json({ ok: true, data: { cleared: tabId ?? 'all' } });
 		});
 
 		// URL
-		this.app.get('/url', cdpGuard, async (_req, res) => {
+		this.app.get('/url', anyTab, async (req, res) => {
 			try {
-				const result = await this.cdp.send('Runtime.evaluate', {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const result = await resolved.tab.send('Runtime.evaluate', {
 					expression: 'window.location.href',
 					returnByValue: true,
 				}) as { result: { value?: string } };
 				res.json({ ok: true, data: result.result.value });
-			} catch (err) {
-				res.json({ ok: false, error: String(err) });
-			}
-		});
-
-		// Tabs
-		this.app.get('/tabs', cdpGuard, async (_req, res) => {
-			try {
-				const result = await this.cdp.send('Target.getTargets') as { targetInfos: unknown[] };
-				const pages = (result.targetInfos as Array<{ type: string }>).filter(t => t.type === 'page');
-				res.json({ ok: true, data: pages });
-			} catch (err) {
-				res.json({ ok: false, error: String(err) });
-			}
-		});
-
-		this.app.post('/tabs/:id/activate', cdpGuard, async (req, res) => {
-			try {
-				await this.cdp.send('Target.activateTarget', { targetId: req.params.id });
-				res.json({ ok: true, data: { activated: req.params.id } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
 			}
@@ -328,7 +382,6 @@ export class BridgeServer {
 	stop(): Promise<void> {
 		return new Promise((resolve) => {
 			if (this.server) {
-				// Close keep-alive connections so close() doesn't hang
 				this.server.closeAllConnections();
 				this.server.close(() => resolve());
 				this.server = null;

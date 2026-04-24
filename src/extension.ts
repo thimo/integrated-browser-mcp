@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { CDPConnection } from './cdp';
+import { CDPManager } from './cdp';
 import { BridgeServer } from './http-server';
 import { StatusBar } from './status-bar';
 
@@ -13,7 +13,7 @@ const STABLE_SERVER = path.join(STABLE_DIR, 'mcp-server.mjs');
 const INSTANCES_DIR = path.join(STABLE_DIR, 'instances');
 
 let log: vscode.OutputChannel;
-let cdp: CDPConnection;
+let cdp: CDPManager;
 let httpServer: BridgeServer;
 let statusBar: StatusBar;
 let running = false;
@@ -49,24 +49,24 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('browserBridge.stop', stopBridge),
 		vscode.commands.registerCommand('browserBridge.status', showStatus),
 		vscode.debug.onDidStartDebugSession(session => {
-			// Auto-connect to externally launched browser child sessions.
-			// Skip root sessions (no CDP) and skip if launchBrowser() is handling it.
-			if (isBrowserSession(session) && session.parentSession && cdp?.state === 'disconnected' && !browserLaunching) {
-				cdp.connectToSession(session).catch(err => {
+			// Auto-connect to externally launched browser child sessions on the
+			// fallback (websocket) path. Skip root sessions (no CDP), skip if
+			// launchBrowser() is handling it, and skip if we already have tabs.
+			if (isBrowserSession(session) && session.parentSession && cdp && cdp.tabCount === 0 && !browserLaunching) {
+				cdp.adoptDebugSession(session).catch(err => {
 					log.appendLine(`[Bridge] Auto-connect failed: ${err}`);
 				});
 			}
 		}),
 		vscode.debug.onDidTerminateDebugSession(session => {
-			// Only disconnect if this is the session we're actually connected to
-			// (or its parent). Avoids killing the bridge when unrelated browser
-			// sessions terminate.
-			if (!cdp || cdp.state === 'disconnected') return;
-			const isOurSession = cdp.sessionId === session.id;
-			const isOurParent = cdp.sessionId && session.type && isBrowserSession(session)
-				&& vscode.debug.activeDebugSession?.id !== cdp.sessionId;
-			if (isOurSession || isOurParent) {
-				cdp.disconnect();
+			// On the fallback path, a single debug session drives the single tab.
+			// When that session terminates, close the tab so state matches reality.
+			if (!cdp || cdp.transport !== 'websocket') return;
+			const tab = cdp.getTab('tab-main');
+			if (tab?.sessionId === session.id) {
+				cdp.closeTab('tab-main').catch(err => {
+					log.appendLine(`[Bridge] Close on debug terminate failed: ${err}`);
+				});
 			}
 		}),
 	);
@@ -90,27 +90,52 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		// 0. Clean up stale instance files from dead processes
 		await cleanStaleInstances();
 
-		// 1. CDP connection
-		cdp = new CDPConnection(log);
-		cdp.onStateChange(state => statusBar.update(state, running, cdp.transport));
+		// 1. CDP manager
+		cdp = new CDPManager(log);
+		cdp.onStateChange(state => statusBar.update(state, running, cdp.transport, summarizeTabs()));
 
 		// 2. HTTP server (with lazy browser launch callback)
 		httpServer = new BridgeServer(cdp, log);
-		httpServer.setEnsureBrowser(() => ensureBrowser());
+		httpServer.setEnsureBrowser(url => ensureBrowser(url));
 		const port = await httpServer.start(preferredPort);
 		actualPort = port;
 		running = true;
-		statusBar.update(cdp.state, true, cdp.transport);
+		statusBar.update(cdp.state, true, cdp.transport, summarizeTabs());
 
-		// 3. If a browser session already exists, connect to it (don't launch a new one)
-		const existingSession = vscode.debug.activeDebugSession && isBrowserSession(vscode.debug.activeDebugSession)
-			? vscode.debug.activeDebugSession
-			: undefined;
-
-		if (existingSession) {
-			await cdp.connectToSession(existingSession);
+		// 3. Wire BrowserTab lifecycle events when the proposed API is available.
+		if (hasProposedBrowserApi()) {
+			context.subscriptions.push(
+				vscode.window.onDidOpenBrowserTab(tab => {
+					// Ignore tabs we're about to open ourselves; adoptBrowserTab is idempotent.
+					cdp.adoptBrowserTab(tab).catch(err => {
+						log.appendLine(`[Bridge] adoptBrowserTab failed: ${err}`);
+					});
+				}),
+				vscode.window.onDidCloseBrowserTab(tab => {
+					cdp.untrackBrowserTab(tab);
+					statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
+				}),
+				vscode.window.onDidChangeActiveBrowserTab(tab => {
+					cdp.syncActive(tab);
+					statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
+				}),
+			);
+			// Adopt any tabs already open at startup.
+			for (const existingTab of vscode.window.browserTabs) {
+				cdp.adoptBrowserTab(existingTab, existingTab === vscode.window.activeBrowserTab).catch(err => {
+					log.appendLine(`[Bridge] Startup adoptBrowserTab failed: ${err}`);
+				});
+			}
+		} else {
+			// Fallback: if a browser debug session is already active, adopt it.
+			const existingSession = vscode.debug.activeDebugSession && isBrowserSession(vscode.debug.activeDebugSession)
+				? vscode.debug.activeDebugSession
+				: undefined;
+			if (existingSession) {
+				await cdp.adoptDebugSession(existingSession);
+			}
+			// Otherwise, browser will be launched lazily on first request.
 		}
-		// Otherwise, browser will be launched lazily on first request
 
 		// 4. Register this instance for MCP discovery
 		await registerInstance(port);
@@ -127,10 +152,15 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 	}
 }
 
-async function ensureBrowser(): Promise<void> {
+/**
+ * Ensure at least one tab exists and is connected. Called by `/navigate` and
+ * other interaction endpoints on first use. When `url` is provided and the
+ * proposed API is available, open the tab directly to that URL to avoid an
+ * about:blank flash.
+ */
+async function ensureBrowser(url?: string): Promise<void> {
 	if (cdp?.state === 'connected') return;
 	if (browserLaunching || cdp?.state === 'connecting') {
-		// Wait for the in-progress connection attempt to finish
 		await new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				disposable.dispose();
@@ -142,13 +172,11 @@ async function ensureBrowser(): Promise<void> {
 					disposable.dispose();
 					resolve();
 				} else if (state === 'disconnected' && !browserLaunching) {
-					// Only give up if no launch is in progress
 					clearTimeout(timeout);
 					disposable.dispose();
 					reject(new Error('Browser connection failed'));
 				}
 			});
-			// Check immediately in case state already changed
 			if (cdp?.state === 'connected') {
 				clearTimeout(timeout);
 				disposable.dispose();
@@ -159,19 +187,24 @@ async function ensureBrowser(): Promise<void> {
 	}
 	browserLaunching = true;
 	try {
-		await launchBrowser();
+		await launchBrowser(url);
 	} finally {
 		browserLaunching = false;
 	}
 }
 
+function summarizeTabs(): { count: number; activeUrl?: string } {
+	const active = cdp?.activeTabId ? cdp.getTab(cdp.activeTabId) : undefined;
+	return { count: cdp?.tabCount ?? 0, activeUrl: active?.url };
+}
+
 async function stopBridge(): Promise<void> {
 	running = false;
 	actualPort = null;
-	cdp?.dispose();
+	await cdp?.dispose();
 	await httpServer?.stop();
 	await unregisterInstance();
-	statusBar?.update('disconnected', false);
+	statusBar?.update('disconnected', false, null, { count: 0 });
 	log?.appendLine('[Bridge] Stopped');
 }
 
@@ -183,9 +216,10 @@ function hasProposedBrowserApi(): boolean {
 
 async function launchBrowserViaProposedApi(): Promise<boolean> {
 	try {
-		log.appendLine('[Bridge] Launching via proposed browser API (openBrowserTab)');
-		const tab = await vscode.window.openBrowserTab('about:blank');
-		await cdp.connectToBrowserTab(tab);
+		log.appendLine('[Bridge] Launching via proposed browser API (openBrowserTab: about:blank)');
+		// Always open about:blank; the caller (e.g. /navigate handler) does the
+		// real navigation once the tab is connected.
+		await cdp.openTab('about:blank', true);
 		return true;
 	} catch (err) {
 		log.appendLine(`[Bridge] Proposed API launch failed: ${err}`);
@@ -193,7 +227,13 @@ async function launchBrowserViaProposedApi(): Promise<boolean> {
 	}
 }
 
-async function launchBrowser(): Promise<void> {
+async function launchBrowser(_lazyUrl?: string): Promise<void> {
+	// The URL hint is currently unused for the proposed-API path (we always
+	// open about:blank and let the caller navigate). The debug-session path
+	// bakes it into the launch config so the very first page load is the
+	// target — one fewer navigation round-trip.
+	const initialUrl = _lazyUrl ?? 'about:blank';
+
 	// Prefer VS Code's proposed `browser` API when available — it bypasses
 	// vscode-js-debug entirely, eliminating the event-forwarding limitations
 	// that prevent worker/service-worker events from reaching us.
@@ -235,7 +275,7 @@ async function launchBrowser(): Promise<void> {
 		type: browserType,
 		request: 'launch',
 		name: 'Browser MCP',
-		url: 'about:blank',
+		url: initialUrl,
 		internalConsoleOptions: 'neverOpen',
 	}, {
 		noDebug: true,
@@ -259,7 +299,7 @@ async function launchBrowser(): Promise<void> {
 	}
 
 	try {
-		await cdp.connectToSession(session);
+		await cdp.adoptDebugSession(session);
 	} catch (err) {
 		log.appendLine(`[Bridge] CDP connect error: ${err}`);
 	}
@@ -368,11 +408,13 @@ async function configureClaude(): Promise<void> {
 
 function showStatus(): void {
 	const cdpState = cdp?.state ?? 'disconnected';
+	const transport = cdp?.transport ?? 'none';
 	const serverState = running ? 'running' : 'stopped';
 	const port = actualPort ?? 'none';
+	const tabs = cdp?.tabCount ?? 0;
 
 	vscode.window.showInformationMessage(
-		`Browser MCP: CDP ${cdpState}, HTTP server ${serverState} on port ${port}`,
+		`Browser MCP: CDP ${cdpState} (${transport}), HTTP on ${port} (${serverState}), ${tabs} tab(s)`,
 	);
 }
 
