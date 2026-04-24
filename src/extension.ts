@@ -405,7 +405,16 @@ async function configureClaude(): Promise<void> {
 		mcpServers[MCP_KEY] = desired;
 		config.mcpServers = mcpServers;
 
-		await fs.promises.writeFile(claudeSettingsPath, JSON.stringify(config, null, 2) + '\n');
+		// Atomic write: stage to a tmp file in the same directory, then
+		// rename on top. If two VS Code windows boot simultaneously they can
+		// both read-modify-write ~/.claude.json and the later one would
+		// clobber the earlier one's changes. Rename is atomic on POSIX, so
+		// the worst outcome is that one window's write is superseded — no
+		// half-written file, no lost unrelated keys (both writes compute
+		// from the same on-disk state and both add the same MCP entry).
+		const tmpPath = `${claudeSettingsPath}.${process.pid}.${Date.now()}.tmp`;
+		await fs.promises.writeFile(tmpPath, JSON.stringify(config, null, 2) + '\n');
+		await fs.promises.rename(tmpPath, claudeSettingsPath);
 		log.appendLine(`[MCP] Configured Claude MCP in ${claudeSettingsPath}`);
 	} catch (err) {
 		log.appendLine(`[MCP] Failed to configure Claude: ${err}`);
