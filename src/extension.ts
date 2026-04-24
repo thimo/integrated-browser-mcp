@@ -48,6 +48,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('browserBridge.start', () => startBridge(context)),
 		vscode.commands.registerCommand('browserBridge.stop', stopBridge),
 		vscode.commands.registerCommand('browserBridge.status', showStatus),
+		vscode.commands.registerCommand('browserBridge.openInBrowser', (uri?: vscode.Uri) => openInBrowser(uri)),
 		vscode.debug.onDidStartDebugSession(session => {
 			// Auto-connect to externally launched browser child sessions on the
 			// fallback (websocket) path. Skip root sessions (no CDP), skip if
@@ -403,6 +404,44 @@ async function configureClaude(): Promise<void> {
 		log.appendLine(`[MCP] Configured Claude MCP in ${claudeSettingsPath}`);
 	} catch (err) {
 		log.appendLine(`[MCP] Failed to configure Claude: ${err}`);
+	}
+}
+
+/**
+ * Explorer/editor context menu command: open the clicked resource in the
+ * integrated browser. Uses the proposed-API `openTab` path when available
+ * (keeps any existing tab open) and falls back to navigating the active
+ * tab on the debug-session path.
+ */
+async function openInBrowser(uri?: vscode.Uri): Promise<void> {
+	if (!uri) {
+		const active = vscode.window.activeTextEditor?.document.uri;
+		if (!active) {
+			vscode.window.showErrorMessage('Open in Integrated Browser: no file selected.');
+			return;
+		}
+		uri = active;
+	}
+	const url = uri.toString();
+	if (!running) {
+		vscode.window.showErrorMessage('Browser Bridge is not running.');
+		return;
+	}
+	try {
+		if (hasProposedBrowserApi()) {
+			await cdp.openTab(url, true);
+			return;
+		}
+		// Fallback path: ensure a tab exists, navigate active.
+		await ensureBrowser(url);
+		const tab = cdp.getTab();
+		if (!tab) {
+			vscode.window.showErrorMessage('No active browser tab to navigate.');
+			return;
+		}
+		await tab.send('Page.navigate', { url });
+	} catch (err) {
+		vscode.window.showErrorMessage(`Open in Integrated Browser failed: ${err instanceof Error ? err.message : err}`);
 	}
 }
 

@@ -56,8 +56,28 @@
       {
         "command": "browserBridge.status",
         "title": "Browser Bridge: Show Status"
+      },
+      {
+        "command": "browserBridge.openInBrowser",
+        "title": "Open in Integrated Browser"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "browserBridge.openInBrowser",
+          "when": "resourceExtname == .html || resourceExtname == .htm || resourceExtname == .pdf || resourceExtname == .svg",
+          "group": "navigation@30"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "browserBridge.openInBrowser",
+          "when": "resourceExtname == .html || resourceExtname == .htm || resourceExtname == .pdf || resourceExtname == .svg",
+          "group": "1_open@30"
+        }
+      ]
+    },
     "configuration": {
       "title": "Browser Bridge",
       "properties": {
