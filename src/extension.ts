@@ -172,7 +172,12 @@ async function ensureBrowser(url?: string): Promise<void> {
 					clearTimeout(timeout);
 					disposable.dispose();
 					resolve();
-				} else if (state === 'disconnected' && !browserLaunching) {
+				} else if (state === 'disconnected' && !browserLaunching && cdp.tabCount === 0) {
+					// Only fail when there's nothing attached at all. Tabs in
+					// mid-adoption can transiently emit 'disconnected' during
+					// bootstrap — those aren't hard failures, they'll flip to
+					// 'connected' once enableDomains finishes. Falling through
+					// to the outer timeout is safer than rejecting eagerly.
 					clearTimeout(timeout);
 					disposable.dispose();
 					reject(new Error('Browser connection failed'));
@@ -423,8 +428,8 @@ async function openInBrowser(uri?: vscode.Uri): Promise<void> {
 		uri = active;
 	}
 	const url = uri.toString();
-	if (!running) {
-		vscode.window.showErrorMessage('Browser Bridge is not running.');
+	if (!cdp) {
+		vscode.window.showErrorMessage('Browser Bridge is not active in this window. Run "Browser Bridge: Start" from the Command Palette.');
 		return;
 	}
 	try {
@@ -432,7 +437,7 @@ async function openInBrowser(uri?: vscode.Uri): Promise<void> {
 			await cdp.openTab(url, true);
 			return;
 		}
-		// Fallback path: ensure a tab exists, navigate active.
+		// Fallback path: lazy-launch if needed, then navigate active tab.
 		await ensureBrowser(url);
 		const tab = cdp.getTab();
 		if (!tab) {

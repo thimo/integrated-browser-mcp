@@ -159,7 +159,11 @@ export class CDPTab {
 
 	private setState(state: CDPState): void {
 		this._state = state;
-		this._onStateChange.fire(state);
+		// Guard: fire() on a disposed emitter throws. `dispose()` sets
+		// `disposed = true` before triggering the final disconnect chain, so
+		// any setState calls from that chain become no-ops instead of
+		// blowing up.
+		if (!this.disposed) this._onStateChange.fire(state);
 	}
 
 	async connectToSession(session: vscode.DebugSession): Promise<void> {
@@ -210,10 +214,15 @@ export class CDPTab {
 					if (!this.disposed) this.setState('disconnected');
 				}),
 			);
-			this.setState('connected');
 			this.log.appendLine(`[CDP:${this.tabId}] BrowserCDPSession ready`);
 			await this.establishPageSession();
 			await this.enableDomains();
+			// Flip to 'connected' only after the page session is attached and
+			// domains are enabled. Otherwise callers that fire send() the moment
+			// state === 'connected' race with an in-flight bootstrap — their
+			// commands default to sessionId: null (browser/root) instead of
+			// _pageSessionId, silently hitting the wrong target.
+			this.setState('connected');
 		} catch (err) {
 			this.log.appendLine(`[CDP:${this.tabId}] connectToBrowserTab failed: ${err}`);
 			this.setState('disconnected');
@@ -244,15 +253,18 @@ export class CDPTab {
 			ws.on('open', async () => {
 				this.ws = ws;
 				this.reconnectAttempts = 0;
-				this.setState('connected');
 				this.log.appendLine(`[CDP:${this.tabId}] WebSocket connected`);
 				settled = true;
 				try {
 					await this.subscribeToEvents();
 					await this.establishPageSession();
 					await this.enableDomains();
+					// Flip to 'connected' only after bootstrap is complete (see
+					// comment in connectToBrowserTab for why).
+					this.setState('connected');
 				} catch (err) {
 					this.log.appendLine(`[CDP:${this.tabId}] Failed to enable domains: ${err}`);
+					this.setState('disconnected');
 				}
 				resolve();
 			});
@@ -350,12 +362,13 @@ export class CDPTab {
 
 			// Back-off against stale observers from older extension versions
 			// (e.g. a 0.3.0 MutationObserver still alive in the page JS context
-			// from before the extension was upgraded). Count every write: if we
-			// have to re-apply our prefix more than a few times in total (not
-			// per-second), something else is undoing it and we should stop.
-			// A legitimate SPA title change wouldn't cause repeated rewrites.
+			// from before the extension was upgraded). Only count a rewrite as
+			// a fight if our previous write was stripped of its prefix — that's
+			// the signature of a rival observer undoing us. A plain SPA title
+			// change (new base title) shouldn't trip the counter.
 			var fightCount = 0;
 			var gaveUp = false;
+			var lastOurWrite = '';
 			var FIGHT_THRESHOLD = 5;
 
 			function ensurePrefix() {
@@ -377,11 +390,21 @@ export class CDPTab {
 					document.head.appendChild(el);
 					updating = false;
 				}
-				var stripped = el.textContent.replace(STRIP, '');
+				var current = el.textContent;
+				var stripped = current.replace(STRIP, '');
 				var want = P + stripped;
-				if (el.textContent === want) return;
+				if (current === want) return;
 
-				fightCount++;
+				// A "fight" is when we wrote X = P + S, and something else
+				// changed it to exactly S (stripped our prefix). If the
+				// current value is our last write stripped, it's a revert.
+				// Any other change is a legitimate new title; reset the
+				// counter so we don't accrue false positives over time.
+				if (lastOurWrite && current === lastOurWrite.replace(STRIP, '')) {
+					fightCount++;
+				} else {
+					fightCount = 0;
+				}
 				if (fightCount > FIGHT_THRESHOLD) {
 					gaveUp = true;
 					try { if (window.__bridgeTitleObserver) window.__bridgeTitleObserver.disconnect(); } catch (_) {}
@@ -396,6 +419,7 @@ export class CDPTab {
 
 				updating = true;
 				el.textContent = want;
+				lastOurWrite = want;
 				updating = false;
 			}
 
@@ -548,7 +572,6 @@ export class CDPTab {
 	 */
 	async setTitlePrefix(prefix: string, ownerId?: string): Promise<void> {
 		if (this.currentTitlePrefix === prefix) return;
-		this.currentTitlePrefix = prefix;
 		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
 		if (!hasTransport) return;
 		const script = this.buildTitleScript(prefix, ownerId ?? null);
@@ -566,6 +589,10 @@ export class CDPTab {
 			this.titleScriptId = result.identifier;
 			// Apply to the current document.
 			await this.send('Runtime.evaluate', { expression: script });
+			// Record the successful prefix only after CDP round-trips succeed.
+			// Otherwise a failed install would leave `currentTitlePrefix` set,
+			// and the early-return guard above would block the next retry.
+			this.currentTitlePrefix = prefix;
 			this.log.appendLine(`[CDP:${this.tabId}] Title prefix set to "${prefix}"`);
 		} catch (err) {
 			this.log.appendLine(`[CDP:${this.tabId}] Failed to set title prefix: ${err}`);
@@ -778,12 +805,16 @@ export class CDPTab {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
+		// Run the title-prefix cleanup BEFORE nulling out `_pageSessionId` —
+		// `removeTitlePrefix` calls `send()` which defaults to that sessionId.
+		// If we cleared it first, the command would route to the browser/root
+		// level and never reach the page, leaving stale markers on the tab.
+		await this.removeTitlePrefix();
 		this._session = null;
 		this._sessionId = null;
 		this._pageSessionId = null;
 		this._browserSessionId = null;
 		this._transport = null;
-		await this.removeTitlePrefix();
 		if (this.ws) {
 			this.ws.close();
 			this.ws = null;
@@ -802,6 +833,9 @@ export class CDPTab {
 	}
 
 	dispose(): void {
+		// Order matters: set `disposed` first so the setState-guard in
+		// `setState()` prevents the in-flight disconnect chain from firing on
+		// an emitter we're about to dispose below.
 		this.disposed = true;
 		this.disconnect();
 		this._onStateChange.dispose();
