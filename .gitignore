@@ -6,3 +6,4 @@ dist/
 *.js.map
 .claude/
 .DS_Store
+tmp/

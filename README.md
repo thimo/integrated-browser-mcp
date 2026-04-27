@@ -79,6 +79,8 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_console` | Read buffered console output (aggregates across tabs when `tabId` omitted) |
 | `browser_network` | Read buffered network requests (aggregates across tabs when `tabId` omitted) |
 | `browser_network_clear` | Clear the network log |
+| `browser_download_set` | Configure where downloads land (default `tmp/downloads`, workspace-scoped) and bypass the native save dialog. See [Headless downloads](#headless-downloads). |
+| `browser_downloads` | Read buffered download events (last 50 per tab, aggregates when `tabId` omitted) |
 | `browser_url` | Get the current page URL |
 | `browser_tab_open` | Open a new browser tab (proposed API only) |
 | `browser_tab_close` | Close a tab by id |
@@ -109,6 +111,8 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 | GET | `/console` | `?limit=N&tabId=X` | Buffered console output (last 200). Aggregates across tabs when `tabId` omitted. |
 | GET | `/network` | `?limit=N&filter=x&tabId=X` | Buffered network requests (last 200). Aggregates across tabs when `tabId` omitted. |
 | POST | `/network/clear` | `?tabId=X` | Clear network log (one tab or all) |
+| POST | `/download/set` | `{ path?, behavior?, tabId? }` | Configure download handling. `behavior` ∈ `allow` (default) / `allowAndName` / `deny` / `default`. `path` is required for `allow`/`allowAndName` and must be absolute when called directly (the MCP layer scopes workspace-relative paths). |
+| GET | `/downloads` | `?limit=N&tabId=X` | Buffered download events (last 50 per tab). Each entry: `{ guid, url, suggestedFilename, state, totalBytes?, receivedBytes?, downloadPath?, startedAt, updatedAt }`. |
 | GET | `/url` | `?tabId=X` | Current page URL |
 | GET | `/tabs` | — | List open tabs `[{ tabId, url, title, active, state, transport }]` |
 | POST | `/tab/open` | `{ url, makeActive? }` | Open a new tab (proposed API only). Returns `{ tabId, url, title }` |
@@ -179,6 +183,25 @@ Multi-tab support requires the proposed API (previous section). When enabled:
 The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. The bridge strips any prefix a prior version of the extension may have left on a pre-existing tab, so you won't see stacked markers after an upgrade.
 
 On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
+
+## Headless downloads
+
+By default the integrated browser shows a native save dialog when a page initiates a download — fine for a human, fatal for an agent. `browser_download_set` switches the active tab's browser session to a configured directory so the file lands somewhere predictable, no UI blocking. `browser_downloads` exposes the buffered `Browser.downloadWillBegin` / `Browser.downloadProgress` events so the agent knows what filename Chromium picked and when the download is finished.
+
+Typical agent flow:
+
+1. `browser_download_set()` — defaults to `<workspace>/tmp/downloads` with `behavior:"allow"`. Parent dirs are created.
+2. Trigger the download (`browser_click`, `browser_navigate` to a file URL, `browser_eval` of a form submit, …).
+3. Poll `browser_downloads` until the matching entry has `state:"completed"`.
+4. Read the file from `<downloadPath>/<suggestedFilename>`.
+5. Optionally `browser_download_set({ behavior: "default" })` to restore the save dialog when done.
+
+Path scoping mirrors `browser_markdown`'s `outputPath`: relative paths resolve against the open workspace folder; absolute paths must live inside it. There is no VS Code setting — the AI calls the tool when it needs the behavior.
+
+Caveats:
+- Behavior is **per browser session**, not per tab — Chromium's `Browser.setDownloadBehavior` is browser-level. Calling `browser_download_set` on any tab affects all tabs of that browser.
+- With `behavior:"allow"` (default), Chromium silently appends ` (1)`, ` (2)`, … to filenames on collision. CDP doesn't expose the suffix; if the agent cares about exact filenames, clear `tmp/downloads` first or use `behavior:"allowAndName"` (saves under the GUID; rename via the events from `browser_downloads`).
+- Add `tmp/` to `.gitignore` — downloads are throwaway.
 
 ## Limitations and trust model
 

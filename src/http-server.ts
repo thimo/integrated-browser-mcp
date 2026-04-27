@@ -1,8 +1,11 @@
 import * as http from 'http';
+import * as fs from 'fs';
 import express from 'express';
 import type { CDPManager } from './cdp';
-import type { CDPTab } from './cdp-tab';
+import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
+
+const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'allowAndName', 'deny', 'default']);
 
 export class BridgeServer {
 	private app: express.Application;
@@ -519,6 +522,42 @@ export class BridgeServer {
 			const tabId = req.query.tabId as string | undefined;
 			this.cdp.clearNetwork(tabId);
 			res.json({ ok: true, data: { cleared: tabId ?? 'all' } });
+		});
+
+		// Download behavior. Replaces the native save dialog with a configured
+		// directory so an agent can download files headless. Path scoping to
+		// the workspace happens in the MCP layer (browser_download_set);
+		// callers hitting this endpoint directly (curl, scripts) pass an
+		// absolute path and own the consequences.
+		this.app.post('/download/set', anyTab, async (req, res) => {
+			try {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const downloadPath = req.body.path as string | undefined;
+				const behavior = (req.body.behavior as string | undefined) ?? 'allow';
+				if (!DOWNLOAD_BEHAVIORS.has(behavior as DownloadBehavior)) {
+					res.json({ ok: false, error: `Invalid behavior "${behavior}". Expected one of: allow, allowAndName, deny, default` });
+					return;
+				}
+				if (behavior === 'allow' || behavior === 'allowAndName') {
+					if (!downloadPath) {
+						res.json({ ok: false, error: 'path is required for behavior allow/allowAndName' });
+						return;
+					}
+					await fs.promises.mkdir(downloadPath, { recursive: true });
+				}
+				await resolved.tab.setDownloadBehavior(downloadPath ?? '', behavior as DownloadBehavior);
+				res.json({ ok: true, data: { path: (behavior === 'allow' || behavior === 'allowAndName') ? downloadPath : null, behavior } });
+			} catch (err) {
+				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+			}
+		});
+
+		this.app.get('/downloads', (req, res) => {
+			const limit = parseInt(req.query.limit as string) || 20;
+			const tabId = req.query.tabId as string | undefined;
+			const entries = tabId ? this.cdp.downloadsForTab(tabId) : this.cdp.downloads;
+			res.json({ ok: true, data: entries.slice(-limit) });
 		});
 
 		// URL

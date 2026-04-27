@@ -394,6 +394,51 @@ server.tool(
 	},
 );
 
+// Download behavior
+server.tool(
+	'browser_download_set',
+	'Configure where the integrated browser saves downloads, bypassing the native save dialog. Default path is `tmp/downloads` (relative to the open workspace folder); call this before triggering a download (click, navigation to a file URL) so the file lands somewhere predictable. Path is scoped to the workspace: relative paths resolve against it; absolute paths must live inside it. Behavior persists for the life of the browser session — pass `behavior:"default"` to restore the normal save dialog when you\'re done. Pair with `browser_downloads` to see file names and progress. Tip: add `tmp/` to .gitignore.',
+	{
+		path: z.string().optional().describe('Directory to save downloads to. Absolute or workspace-relative; resolved against the open workspace folder; the resolved path must live inside it. Parent directories are created automatically. Default: `tmp/downloads`. Ignored when behavior is `deny` or `default`.'),
+		behavior: z.enum(['allow', 'allowAndName', 'deny', 'default']).optional().describe('CDP setDownloadBehavior. `allow` (default) saves with the server-suggested filename — Chromium adds " (1)" on collision. `allowAndName` saves with the GUID; only useful if you specifically need to handle naming yourself via the events in browser_downloads. `deny` blocks downloads silently. `default` restores the native "ask where to save" dialog.'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ path: pathArg, behavior, tabId }) => {
+		const effectiveBehavior = behavior ?? 'allow';
+		let resolvedPath: string | undefined;
+		if (effectiveBehavior === 'allow' || effectiveBehavior === 'allowAndName') {
+			const instance = discoverInstance();
+			if (!instance?.workspace) {
+				return { content: [{ type: 'text' as const, text: `Error: download path requires an open workspace folder` }], isError: true };
+			}
+			const workspace = instance.workspace;
+			const inputPath = pathArg ?? 'tmp/downloads';
+			resolvedPath = path.isAbsolute(inputPath)
+				? path.resolve(inputPath)
+				: path.resolve(workspace, inputPath);
+			if (resolvedPath !== workspace && !resolvedPath.startsWith(workspace + path.sep)) {
+				return { content: [{ type: 'text' as const, text: `Error: download path must be inside the workspace (${workspace}); got ${resolvedPath}` }], isError: true };
+			}
+		}
+		return toMcpResult(await bridgePost('/download/set', { path: resolvedPath, behavior: effectiveBehavior, tabId }));
+	},
+);
+
+// Downloads buffer
+server.tool(
+	'browser_downloads',
+	'Read recent download events (last 50 per tab). Each entry: `{ guid, url, suggestedFilename, state, totalBytes?, receivedBytes?, downloadPath?, startedAt, updatedAt, tabId }`. State is `inProgress`, `completed`, or `canceled`. After completion with behavior:"allow", the file lives at `<downloadPath>/<suggestedFilename>` (Chromium adds " (1)" suffix on collision; not observable from CDP). Events only flow after `browser_download_set` has been called.',
+	{
+		limit: z.number().int().min(1).max(50).default(20).describe('Max entries to return'),
+		tabId: z.string().optional().describe('Filter to one tab. Omit to aggregate across all tabs.'),
+	},
+	async ({ limit, tabId }) => {
+		const params = new URLSearchParams({ limit: String(limit) });
+		if (tabId) params.set('tabId', tabId);
+		return toMcpResult(await bridgeFetch(`/downloads?${params}`));
+	},
+);
+
 // URL
 server.tool(
 	'browser_url',

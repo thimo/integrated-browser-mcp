@@ -28,6 +28,44 @@ export interface NetworkEntry {
 	tabId?: string;
 }
 
+/**
+ * `Browser.setDownloadBehavior` modes.
+ *
+ *  - `allow`        — save to `downloadPath` using the server-suggested
+ *                     filename. Chromium silently appends ` (N)` on
+ *                     collision; the suffix is NOT observable from CDP.
+ *  - `allowAndName` — save under the GUID instead of the suggested
+ *                     filename. Pair with the events from `browser_downloads`
+ *                     when the agent needs deterministic file naming.
+ *  - `deny`         — block the download silently.
+ *  - `default`      — restore the native "ask where to save" dialog.
+ */
+export type DownloadBehavior = 'allow' | 'allowAndName' | 'deny' | 'default';
+
+/**
+ * One entry in the download buffer. Built from `Browser.downloadWillBegin`
+ * (creation) + `Browser.downloadProgress` (updates). Events only flow while
+ * a `setDownloadBehavior` with `eventsEnabled: true` is active.
+ */
+export interface DownloadEntry {
+	guid: string;
+	url: string;
+	suggestedFilename: string;
+	state: 'inProgress' | 'completed' | 'canceled';
+	totalBytes?: number;
+	receivedBytes?: number;
+	/**
+	 * The download path the bridge configured at `downloadWillBegin` time.
+	 * Helps the agent locate the file: with `behavior: "allow"` the file is
+	 * at `<downloadPath>/<suggestedFilename>` (modulo collision suffix).
+	 */
+	downloadPath?: string;
+	startedAt: number;
+	updatedAt: number;
+	/** Set by CDPManager when aggregating across tabs. */
+	tabId?: string;
+}
+
 interface ChildTargetInfo {
 	type: string;
 	url: string;
@@ -36,6 +74,7 @@ interface ChildTargetInfo {
 
 const CONSOLE_BUFFER_SIZE = 200;
 const NETWORK_BUFFER_SIZE = 200;
+const DOWNLOAD_BUFFER_SIZE = 50;
 
 /**
  * One browser tab's worth of CDP connection + buffers.
@@ -82,6 +121,10 @@ export class CDPTab {
 	private consoleBuffer: ConsoleEntry[] = [];
 	private networkBuffer: NetworkEntry[] = [];
 	private networkMap = new Map<string, NetworkEntry>();
+	private downloadBuffer: DownloadEntry[] = [];
+	private downloadMap = new Map<string, DownloadEntry>();
+	/** Last download path configured via setDownloadBehavior (allow/allowAndName). Stamped onto DownloadEntry.downloadPath on downloadWillBegin so the agent can locate completed files. */
+	private currentDownloadPath: string | null = null;
 	private childSessions = new Map<string, ChildTargetInfo>();
 	private eventCounts = new Map<string, number>();
 
@@ -155,6 +198,10 @@ export class CDPTab {
 	clearNetwork(): void {
 		this.networkBuffer = [];
 		this.networkMap.clear();
+	}
+
+	get downloads(): DownloadEntry[] {
+		return this.downloadBuffer;
 	}
 
 	private setState(state: CDPState): void {
@@ -464,9 +511,9 @@ export class CDPTab {
 	private async subscribeToEvents(): Promise<void> {
 		try {
 			await this.send('JsDebug.subscribe', {
-				events: ['Runtime.*', 'Network.*', 'Target.*', 'Page.*'],
+				events: ['Runtime.*', 'Network.*', 'Target.*', 'Page.*', 'Browser.*'],
 			}, { sessionId: null });
-			this.log.appendLine(`[CDP:${this.tabId}] Subscribed to events (Runtime, Network, Target, Page)`);
+			this.log.appendLine(`[CDP:${this.tabId}] Subscribed to events (Runtime, Network, Target, Page, Browser)`);
 		} catch (err) {
 			this.log.appendLine(`[CDP:${this.tabId}] JsDebug.subscribe failed (${err}); events may not flow`);
 		}
@@ -649,7 +696,101 @@ export class CDPTab {
 				if (frame?.url && !frame.parentId) this._lastKnownUrl = frame.url;
 				break;
 			}
+			// Download events fire under `Page.*` on the BrowserTab
+			// (proposed-API) transport and also surface as `Browser.*` on
+			// some Chromium / proxy combinations. The CDP spec marks the
+			// `Page.*` variants deprecated, but in practice they're the ones
+			// that fire in the integrated browser today. Listen to both and
+			// dedupe by guid in `onDownloadWillBegin` so a future Chromium
+			// that emits both doesn't create duplicate buffer entries.
+			case 'Browser.downloadWillBegin':
+			case 'Page.downloadWillBegin':
+				this.onDownloadWillBegin(params);
+				break;
+			case 'Browser.downloadProgress':
+			case 'Page.downloadProgress':
+				this.onDownloadProgress(params);
+				break;
 		}
+	}
+
+	private onDownloadWillBegin(params: Record<string, unknown>): void {
+		const guid = params.guid as string | undefined;
+		if (!guid) return;
+		const entry: DownloadEntry = {
+			guid,
+			url: (params.url as string) ?? '',
+			suggestedFilename: (params.suggestedFilename as string) ?? '',
+			state: 'inProgress',
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+		};
+		if (this.currentDownloadPath) entry.downloadPath = this.currentDownloadPath;
+		this.downloadMap.set(guid, entry);
+		this.downloadBuffer.push(entry);
+		if (this.downloadBuffer.length > DOWNLOAD_BUFFER_SIZE) {
+			const removed = this.downloadBuffer.shift()!;
+			this.downloadMap.delete(removed.guid);
+		}
+	}
+
+	private onDownloadProgress(params: Record<string, unknown>): void {
+		const guid = params.guid as string | undefined;
+		if (!guid) return;
+		const entry = this.downloadMap.get(guid);
+		if (!entry) return;
+		if (typeof params.totalBytes === 'number') entry.totalBytes = params.totalBytes;
+		if (typeof params.receivedBytes === 'number') entry.receivedBytes = params.receivedBytes;
+		const state = params.state as DownloadEntry['state'] | undefined;
+		if (state) entry.state = state;
+		entry.updatedAt = Date.now();
+	}
+
+	/**
+	 * Configure download handling for this tab. With behavior `allow`
+	 * (default) Chromium saves files to `downloadPath` using the server-
+	 * suggested filename (collisions get a " (1)" suffix that's not
+	 * observable from CDP). `allowAndName` saves under the GUID instead —
+	 * pair with the events from `browser_downloads` if you need
+	 * deterministic naming. `deny` blocks. `default` restores the native
+	 * save dialog.
+	 *
+	 * Two CDP commands exist for this:
+	 *  - `Page.setDownloadBehavior(behavior, downloadPath)` — deprecated
+	 *    upstream but the only one that actually takes effect through VS
+	 *    Code's BrowserTab session multiplexer (verified empirically: a
+	 *    `Browser.setDownloadBehavior` at the browser session is silently
+	 *    ignored, the native save dialog still appears). Page-scoped, so
+	 *    each tab is configured independently.
+	 *  - `Browser.setDownloadBehavior(behavior, downloadPath, browserContextId?, eventsEnabled?)`
+	 *    — newer, browser-wide. Required for `allowAndName` (Page.* doesn't
+	 *    support it). We send it as a best-effort second call so it
+	 *    propagates wherever the proxy is willing to honor it; failure is
+	 *    swallowed to keep behavior consistent on the integrated-browser
+	 *    transport.
+	 *
+	 * Download events fire automatically at the Page domain — no separate
+	 * `eventsEnabled` flag needed for `Page.setDownloadBehavior`.
+	 */
+	async setDownloadBehavior(downloadPath: string, behavior: DownloadBehavior = 'allow'): Promise<void> {
+		if ((behavior === 'allow' || behavior === 'allowAndName') && !downloadPath) {
+			throw new Error('downloadPath required for behavior ' + behavior);
+		}
+		const pageBehavior = behavior === 'allowAndName' ? 'allow' : behavior;
+		const pageParams: Record<string, unknown> = { behavior: pageBehavior };
+		if (pageBehavior === 'allow') pageParams.downloadPath = downloadPath;
+		await this.send('Page.setDownloadBehavior', pageParams);
+
+		// Best-effort browser-level call so `allowAndName` and any future
+		// browser-context-scoped flags work where the proxy honors them.
+		// Silently swallowed on the integrated-browser transport.
+		const browserParams: Record<string, unknown> = { behavior, eventsEnabled: true };
+		if (behavior === 'allow' || behavior === 'allowAndName') browserParams.downloadPath = downloadPath;
+		await this.send('Browser.setDownloadBehavior', browserParams, {
+			sessionId: this._browserSessionId ?? null,
+		}).catch(() => { /* not supported on this transport */ });
+
+		this.currentDownloadPath = (behavior === 'allow' || behavior === 'allowAndName') ? downloadPath : null;
 	}
 
 	private onTargetAttached(params: Record<string, unknown>): void {

@@ -5,6 +5,15 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-04-27
+
+### Added
+- New `browser_download_set` and `browser_downloads` tools for headless downloads. By default the integrated browser shows a native save dialog when a page initiates a download — fine for a human, fatal for an agent. `browser_download_set` configures Chromium to save to a directory instead (default `<workspace>/tmp/downloads`, workspace-scoped exactly like `browser_markdown`'s `outputPath`); `browser_downloads` exposes a 50-entry circular buffer of `downloadWillBegin` / `downloadProgress` events so the agent learns the suggested filename and can poll for `state:"completed"`. Behavior is opt-in — no VS Code setting, no auto-call on activation — so humans using the integrated browser keep the normal save dialog until the agent flips the switch. Supports all four CDP behaviors (`allow`, `allowAndName`, `deny`, `default`); `default` restores the dialog when done.
+  - Implementation notes worth recording, since the next person to touch download handling will hit the same surprises:
+    1. **`Page.setDownloadBehavior`, not `Browser.setDownloadBehavior`.** The CDP spec marks `Page.*` deprecated in favor of `Browser.*`, but in VS Code's integrated browser the `Browser.*` command is silently ignored — the native save dialog still appears. The page-scoped, deprecated command is the only one that actually takes effect through the BrowserTab session multiplexer. We keep a best-effort `Browser.*` call as a second step for `allowAndName` (which `Page.*` doesn't support) and forward-compat; failures are swallowed.
+    2. **`Page.downloadWillBegin` / `Page.downloadProgress`, not `Browser.*`.** Same story for events: only the `Page.*` variants fire on this transport. The handler listens to both and dedupes by GUID so future Chromium versions that emit both don't double-count.
+    3. **`Browser.*` added to the `JsDebug.subscribe` allowlist** on the websocket-fallback transport too, so the best-effort `Browser.*` call's events would flow if the upstream proxy ever starts forwarding them.
+
 ## [0.5.0] — 2026-04-27
 
 ### Added

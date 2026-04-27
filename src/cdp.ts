@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import { CDPTab, CDPState, ConsoleEntry, NetworkEntry } from './cdp-tab';
+import { CDPTab, CDPState, ConsoleEntry, NetworkEntry, DownloadEntry } from './cdp-tab';
 
-export { CDPState, ConsoleEntry, NetworkEntry };
+export { CDPState, ConsoleEntry, NetworkEntry, DownloadEntry };
 
 export interface TabInfo {
 	tabId: string;
@@ -314,6 +314,20 @@ export class CDPManager {
 			return;
 		}
 		for (const tab of this.tabs.values()) tab.clearNetwork();
+	}
+
+	get downloads(): DownloadEntry[] {
+		const all: DownloadEntry[] = [];
+		for (const tab of this.tabs.values()) {
+			for (const e of tab.downloads) all.push({ ...e, tabId: tab.tabId });
+		}
+		return all.sort((a, b) => a.startedAt - b.startedAt);
+	}
+
+	downloadsForTab(tabId: string): DownloadEntry[] {
+		const tab = this.tabs.get(tabId);
+		if (!tab) return [];
+		return tab.downloads.map(e => ({ ...e, tabId }));
 	}
 
 	/** Aggregated child sessions across all tabs, stamped with tabId. */
