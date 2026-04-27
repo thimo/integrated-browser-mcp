@@ -17,8 +17,6 @@ MCP Server  ──HTTP──▶  VS Code Extension  ──CDP──▶  Integrat
 
 The extension uses VS Code's built-in `editor-browser` and the Chrome DevTools Protocol (CDP) to provide full browser automation: navigation, JavaScript evaluation, clicking, typing, screenshots, DOM access, console and network monitoring.
 
-Console and network events from iframes are captured alongside top-level page events. Web worker events are not currently captured — this needs a migration to VS Code's proposed `browser` API (planned for a future release).
-
 ## Getting started
 
 1. Install the extension
@@ -40,62 +38,21 @@ Or reference the MCP server:
 use the integrated-browser-mcp to open my app
 ```
 
-To avoid Claude Code picking the wrong browser tool, add this to your project's `CLAUDE.md`:
+The MCP server ships an `instructions` field that conformant clients surface to the model automatically. If your agent still picks the wrong tool (e.g. shells out to `open` instead of using `browser_navigate`), add a short hint to your project's `CLAUDE.md`:
 
 ```
-For browser automation, use the integrated-browser-mcp MCP tools (browser_navigate, browser_screenshot, etc.), not the claude-in-chrome tools.
-```
-
-### Briefing an AI agent
-
-The MCP server ships a top-level `instructions` field on connect. Clients that honour it (per the MCP spec) surface it to the model automatically. Claude Code's routing classifier sometimes decides on a shell command (like `open <URL>`) before consulting the MCP instructions, so a parallel hint in your project `CLAUDE.md` is the reliable belt-and-braces. Paste the block below:
-
-```
-# Browser automation — integrated-browser-mcp
-
-When the user says "open <URL>", "visit <URL>", "navigate to <URL>",
-"show me <URL>", or anything similar, ALWAYS use the integrated-browser-mcp
-tools — never shell out to `open`, `xdg-open`, `start`, or any other
-system-browser launcher. The user expects the page inside their VS Code
-editor, not in a separate Chrome window.
-
-- Opening a URL → browser_navigate (or browser_tab_open to keep the
-  current page in a side tab).
-- Reading data from the page → browser_eval with a small JS expression.
-  Prefer this over browser_dom (heavy) or browser_screenshot (heaviest).
-- Clicking / typing → browser_click / browser_type.
-- Understanding page structure → browser_snapshot (accessibility tree).
-- Recent logs or requests → browser_console / browser_network. Already
-  buffered; filter by tabId.
-
-Tabs are numbered: the "(N) " prefix in each tab title matches the
-`number` field in browser_tab_list. When the user says "reload browser 2"
-or "tab 3", match by number.
-
-Do NOT use screenshot-based browser tools from other MCPs (claude-in-chrome,
-playwright, etc.) when integrated-browser-mcp is available — the user
-specifically wants their VS Code browser.
+For browser automation, use the integrated-browser-mcp MCP tools (browser_navigate, browser_screenshot, etc.) — never shell out to `open`/`xdg-open`/`start`.
 ```
 
 ### Usage with curl
 
 ```bash
-# Navigate
 curl -X POST http://127.0.0.1:3788/navigate \
   -H 'Content-Type: application/json' \
   -d '{"url":"http://localhost:3000"}'
-
-# Screenshot (returns base64 PNG)
-curl http://127.0.0.1:3788/screenshot
-
-# Run JavaScript
-curl -X POST http://127.0.0.1:3788/eval \
-  -H 'Content-Type: application/json' \
-  -d '{"expression":"document.title"}'
-
-# Check status
-curl http://127.0.0.1:3788/status
 ```
+
+See [HTTP API](#http-api) below for the full endpoint list.
 
 ## MCP tools
 
@@ -108,12 +65,12 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_click` | Click an element by CSS selector |
 | `browser_type` | Type text into an element by CSS selector |
 | `browser_scroll` | Scroll the page or a specific element |
-| `browser_screenshot` | Take a screenshot (returns image). Supports `fullPage` for whole-document capture and `waitMs` for post-transition timing. |
-| `browser_screenshot_slice` | Capture one viewport-height slice of a long page plus metadata. For AI navigation of pages that exceed Chromium's single-PNG axis cap. Pair with `browser_emulate` to set the viewport first. |
-| `browser_markdown` | Extract page content as markdown (lightweight pure-JS DOM walker — no Readability/Turndown). Useful for reading documentation pages without dumping the entire DOM. Pass `outputPath` to write the markdown to disk and return only a byte-count confirmation — scoped to the open workspace folder (relative paths resolve against it; absolute paths must live inside it), keeps content out of the agent's context for bulk archival. |
-| `browser_snapshot` | Get the accessibility tree |
+| `browser_screenshot` | Capture page as PNG. `fullPage` for whole-document capture; `waitMs` to delay capture for in-flight CSS transitions. |
+| `browser_screenshot_slice` | Capture one viewport-height slice of a long page. For pages exceeding Chromium's single-PNG axis cap (~16k px). Pair with `browser_emulate` first. |
 | `browser_emulate` | Override viewport dimensions, DPR, mobile flag, and User-Agent. Sticky until `reset:true`. |
+| `browser_snapshot` | Get the accessibility tree |
 | `browser_dom` | Get the full page HTML |
+| `browser_markdown` | Extract page content as markdown (lightweight DOM walker, not Turndown). Pass `outputPath` to write to disk instead of returning the body — workspace-scoped. |
 | `browser_console` | Read buffered console output (aggregates across tabs when `tabId` omitted) |
 | `browser_network` | Read buffered network requests (aggregates across tabs when `tabId` omitted) |
 | `browser_network_clear` | Clear the network log |
@@ -127,8 +84,6 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 ## HTTP API
 
 All responses follow the format `{ ok: true, data: ... }` or `{ ok: false, error: "..." }`.
-
-The server binds to `127.0.0.1` only — never exposed to the network.
 
 All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snapshot, dom, url) accept an optional `tabId` — as a `?tabId=` query param on GET requests or in the JSON body on POST. Omit to target the active tab.
 
@@ -188,19 +143,6 @@ cat ~/.integrated-browser-mcp/instances/*.json
 
 Stale instance files from crashed VS Code windows are cleaned up automatically on the next window startup. You can also delete them manually.
 
-## Extension settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `browserBridge.httpPort` | `3788` | Preferred port for the HTTP server |
-| `browserBridge.autoStart` | `true` | Start the bridge automatically when VS Code opens |
-
-## Commands
-
-- **Browser Bridge: Start** — Start the bridge manually
-- **Browser Bridge: Stop** — Stop the bridge
-- **Browser Bridge: Show Status** — Show connection status
-
 ## Enabling worker event capture (proposed API)
 
 By default the bridge launches the integrated browser via a VS Code debug session and talks to it through `vscode-js-debug`'s CDP proxy. That proxy only forwards events from the main page session — so logs and network requests from web workers and service workers never reach the `/console` and `/network` buffers.
@@ -233,15 +175,9 @@ The `(N) ` prefix is auto-applied even to pages without a `<title>` element (abo
 
 On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
 
-## Known limitations
+## Limitations and trust model
 
-- On the debug-session path (without the proposed API flag): the browser runs as a VS Code debug session in `noDebug` mode. This means the debug toolbar and a "(1)" badge on the Run & Debug icon appear when the browser is active.
-- On the debug-session path: web worker and service worker events are not captured, and only one tab is supported.
-- `/eval` executes arbitrary JavaScript in whatever page is open. Use with care.
-- The browser tab opens in the VS Code editor area. It can be moved to a side panel or closed (which disconnects CDP).
-
-## Security
-
-- HTTP server binds to `127.0.0.1` only
-- No authentication (localhost only, same as VS Code's built-in terminals)
-- `/eval` runs arbitrary JS — same trust model as the DevTools console
+- HTTP server binds to `127.0.0.1` only — never network-exposed. No authentication, same trust model as VS Code's built-in terminals.
+- `/eval` runs arbitrary JavaScript in the open page — same trust model as the DevTools console. Don't pass untrusted input.
+- On the debug-session path (default, no proposed-API flag): only one tab, web worker and service worker events not captured, and the debug toolbar / "(1)" badge appears while the browser is active.
+- The browser tab lives in the VS Code editor area. Moving it to a side panel is fine; closing it disconnects CDP.
