@@ -23,7 +23,7 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
-function discoverPort(): number | null {
+function discoverInstance(): Instance | null {
 	const cwd = process.cwd();
 	try {
 		const files = fs.readdirSync(INSTANCES_DIR).filter(f => f.endsWith('.json'));
@@ -46,19 +46,23 @@ function discoverPort(): number | null {
 			if (!inst.workspace) continue;
 			// Ensure match is on a path boundary (exact match or followed by separator)
 			if (cwd === inst.workspace || cwd.startsWith(inst.workspace + path.sep)) {
-				return inst.port;
+				return inst;
 			}
 		}
 
 		// Fallback: return the most recently started instance
 		instances.sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
 		if (instances.length > 0) {
-			return instances[0].port;
+			return instances[0];
 		}
 	} catch {
 		// instances dir doesn't exist yet
 	}
 	return null;
+}
+
+function discoverPort(): number | null {
+	return discoverInstance()?.port ?? null;
 }
 
 function getBridgeUrl(): string {
@@ -275,10 +279,10 @@ server.tool(
 // Markdown
 server.tool(
 	'browser_markdown',
-	'Extract page content as markdown. Walks the DOM in-page (~80 lines of pure JS, no Readability/Turndown, no deps). Headings → `#`, links → `[text](url)`, code → backticks, pre → fenced blocks, lists → `-` / `1.`, blockquotes → `>`, images → `![alt](src)`. By default scopes to `<main>` if present, else `<body>`; pass `selector` to scope elsewhere. Useful for letting an agent read a doc page without dumping the entire DOM (browser_dom is much heavier). Lightweight extractor, not Turndown — output may include layout artifacts on heavily designed sites; for those use browser_dom + your own post-processing. Pass `outputPath` (absolute) to write the markdown to disk and return only `Saved N bytes to <path>` — useful for bulk archival where the body would otherwise flow through the agent\'s context.',
+	'Extract page content as markdown. Walks the DOM in-page (~80 lines of pure JS, no Readability/Turndown, no deps). Headings → `#`, links → `[text](url)`, code → backticks, pre → fenced blocks, lists → `-` / `1.`, blockquotes → `>`, images → `![alt](src)`. By default scopes to `<main>` if present, else `<body>`; pass `selector` to scope elsewhere. Useful for letting an agent read a doc page without dumping the entire DOM (browser_dom is much heavier). Lightweight extractor, not Turndown — output may include layout artifacts on heavily designed sites; for those use browser_dom + your own post-processing. Pass `outputPath` to write the markdown to disk and return only `Saved N bytes to <path>` — the path is scoped to the open workspace folder (relative paths resolve against it; absolute paths must live inside it). Useful for bulk archival where the body would otherwise flow through the agent\'s context.',
 	{
 		selector: z.string().optional().describe('CSS selector to scope extraction to (e.g. "article", "#content"). Default: "main" if present, else body.'),
-		outputPath: z.string().optional().describe('Absolute path to write the markdown to. Parent directories are created if missing; existing files are overwritten. When set, the tool returns a short "Saved N bytes to <path>" confirmation instead of the markdown body — keeps the content out of the agent\'s context for archival jobs.'),
+		outputPath: z.string().optional().describe('Path (absolute or workspace-relative) to write the markdown to. Resolved against the open workspace folder; the resolved path must live inside it. Parent directories are created if missing; existing files are overwritten. When set, the tool returns a short "Saved N bytes to <path>" confirmation instead of the markdown body — keeps the content out of the agent\'s context for archival jobs. Symlinks inside the workspace that escape it are not followed; don\'t enable in workspaces with hostile symlinks.'),
 		tabId: z.string().optional().describe(tabIdDescription),
 	},
 	async ({ selector, outputPath, tabId }) => {
@@ -291,18 +295,31 @@ server.tool(
 			return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
 		}
 		if (outputPath !== undefined) {
-			if (!path.isAbsolute(outputPath)) {
-				return { content: [{ type: 'text' as const, text: `Error: outputPath must be absolute (got "${outputPath}")` }], isError: true };
+			// Scope outputPath to the bound workspace folder. Relative paths
+			// resolve against the workspace; absolute paths must live inside
+			// it. Symlinks are not followed — `fs.realpath` per write would
+			// add cost for a low-probability case in a workspace the user
+			// controls; documented above instead.
+			const instance = discoverInstance();
+			if (!instance?.workspace) {
+				return { content: [{ type: 'text' as const, text: `Error: outputPath requires an open workspace folder` }], isError: true };
+			}
+			const workspace = instance.workspace;
+			const resolved = path.isAbsolute(outputPath)
+				? path.resolve(outputPath)
+				: path.resolve(workspace, outputPath);
+			if (resolved !== workspace && !resolved.startsWith(workspace + path.sep)) {
+				return { content: [{ type: 'text' as const, text: `Error: outputPath must be inside the workspace (${workspace}); got ${resolved}` }], isError: true };
 			}
 			const body = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
 			try {
-				await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
-				await fs.promises.writeFile(outputPath, body, 'utf8');
+				await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
+				await fs.promises.writeFile(resolved, body, 'utf8');
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: 'text' as const, text: `Error: failed to write ${outputPath}: ${message}` }], isError: true };
+				return { content: [{ type: 'text' as const, text: `Error: failed to write ${resolved}: ${message}` }], isError: true };
 			}
-			return { content: [{ type: 'text' as const, text: `Saved ${Buffer.byteLength(body, 'utf8')} bytes to ${outputPath}` }] };
+			return { content: [{ type: 'text' as const, text: `Saved ${Buffer.byteLength(body, 'utf8')} bytes to ${resolved}` }] };
 		}
 		return toMcpResult(result);
 	},
