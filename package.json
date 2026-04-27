@@ -114,7 +114,8 @@
     "check-types": "tsc --noEmit && tsc --noEmit -p tsconfig.mcp.json",
     "lint": "eslint src",
     "test": "vscode-test",
-    "publish:marketplace": "vsce publish --allow-proposed-apis browser"
+    "publish:marketplace": "vsce publish --allow-proposed-apis browser",
+    "release": "scripts/release.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
