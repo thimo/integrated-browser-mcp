@@ -13,6 +13,7 @@ export class BridgeServer {
 	private cdp: CDPManager;
 	private log: vscode.OutputChannel;
 	private ensureBrowser: ((url?: string) => Promise<void>) | null = null;
+	private emulatePath: 'emulation' | 'page' | 'unknown' = 'unknown';
 
 	constructor(cdp: CDPManager, log: vscode.OutputChannel) {
 		this.cdp = cdp;
@@ -81,6 +82,7 @@ export class BridgeServer {
 					consoleBufferSize: this.cdp.console.length,
 					networkBufferSize: this.cdp.network.length,
 					events: this.cdp.events,
+					emulatePath: this.emulatePath,
 				},
 			});
 		});
@@ -288,15 +290,17 @@ export class BridgeServer {
 		// without that, mobile sites render their desktop fallback even
 		// at iPhone dimensions.
 		//
-		// Uses the deprecated `Page.setDeviceMetricsOverride` rather
-		// than the modern `Emulation.setDeviceMetricsOverride`. In a
-		// normal Chrome they're equivalent, but VS Code's `BrowserTab`
-		// surface silently drops the Emulation call's
-		// width/height/deviceScaleFactor (only the mobile flag sticks).
-		// The deprecated `Page.*` path isn't filtered and is the only
-		// way to get actual viewport + DPR overrides in the integrated
-		// browser pane. `Emulation.clearDeviceMetricsOverride` clears
-		// the Page.* override too, so reset stays one call.
+		// Two-path strategy: try the modern `Emulation.setDeviceMetrics-
+		// Override` first, then verify it stuck by checking
+		// `window.innerWidth`. If VS Code's `BrowserTab` surface silently
+		// drops the Emulation width/height (which it has historically
+		// done — only `mobile` survives the filter), fall back to the
+		// deprecated `Page.setDeviceMetricsOverride`. The Page.* path
+		// isn't filtered today but is gone from upstream Chromium, so
+		// preferring Emulation.* makes the bridge forward-compatible
+		// with whichever side gets fixed first. `/status` exposes which
+		// path won most recently for debugging. `Emulation.clearDevice-
+		// MetricsOverride` clears either override, so reset is one call.
 		this.app.post('/emulate', anyTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
@@ -314,17 +318,34 @@ export class BridgeServer {
 					return;
 				}
 				const isMobile = mobile === true;
-				await resolved.tab.send('Page.setDeviceMetricsOverride', {
-					width,
-					height,
-					deviceScaleFactor: typeof deviceScaleFactor === 'number' ? deviceScaleFactor : 1,
-					mobile: isMobile,
-				});
+				const dpr = typeof deviceScaleFactor === 'number' ? deviceScaleFactor : 1;
+				const params = { width, height, deviceScaleFactor: dpr, mobile: isMobile };
+
+				let path: 'emulation' | 'page' = 'emulation';
+				try {
+					await resolved.tab.send('Emulation.setDeviceMetricsOverride', params);
+				} catch {
+					path = 'page';
+				}
+				if (path === 'emulation') {
+					const probe = await resolved.tab.send('Runtime.evaluate', {
+						expression: 'window.innerWidth',
+						returnByValue: true,
+					}) as { result: { value: number } };
+					if (probe.result.value !== width) {
+						path = 'page';
+					}
+				}
+				if (path === 'page') {
+					await resolved.tab.send('Page.setDeviceMetricsOverride', params);
+				}
+				this.emulatePath = path;
+
 				await resolved.tab.send('Emulation.setTouchEmulationEnabled', { enabled: isMobile });
 				if (typeof userAgent === 'string' && userAgent.length > 0) {
 					await resolved.tab.send('Emulation.setUserAgentOverride', { userAgent });
 				}
-				res.json({ ok: true, data: { width, height, deviceScaleFactor: deviceScaleFactor ?? 1, mobile: isMobile, userAgent: userAgent ?? null } });
+				res.json({ ok: true, data: { width, height, deviceScaleFactor: dpr, mobile: isMobile, userAgent: userAgent ?? null, path } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
 			}
