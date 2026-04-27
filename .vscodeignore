@@ -20,3 +20,4 @@ tsconfig.mcp.json
 **/.vscode-test.*
 media/*.svg
 *.vsix
+tmp/**
