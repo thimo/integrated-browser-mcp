@@ -203,7 +203,7 @@ export class BridgeServer {
 		// Type
 		this.app.post('/type', anyTab, async (req, res) => {
 			try {
-				const { selector, text } = req.body;
+				const { selector, text, submit } = req.body;
 				if (!selector || text === undefined) {
 					res.json({ ok: false, error: 'Missing selector or text' });
 					return;
@@ -227,7 +227,17 @@ export class BridgeServer {
 					return;
 				}
 				await resolved.tab.send('Input.insertText', { text });
-				res.json({ ok: true, data: { typed: text.length } });
+				if (submit) {
+					const enterKey = {
+						key: 'Enter',
+						code: 'Enter',
+						windowsVirtualKeyCode: 13,
+						nativeVirtualKeyCode: 13,
+					};
+					await resolved.tab.send('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', unmodifiedText: '\r', ...enterKey });
+					await resolved.tab.send('Input.dispatchKeyEvent', { type: 'keyUp', ...enterKey });
+				}
+				res.json({ ok: true, data: { typed: text.length, submitted: Boolean(submit) } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
 			}

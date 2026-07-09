@@ -70,7 +70,7 @@ All responses: `{ ok: true, data: ... }` or `{ ok: false, error: "..." }`
 | POST | `/navigate` | `{ url }` | Navigate to URL |
 | POST | `/eval` | `{ expression }` | Run JS, returns result |
 | POST | `/click` | `{ selector }` | Click by CSS selector |
-| POST | `/type` | `{ selector, text }` | Type into element |
+| POST | `/type` | `{ selector, text, submit? }` | Type into element; `submit: true` presses Enter after |
 | POST | `/scroll` | `{ deltaX, deltaY, selector? }` | Scroll |
 | GET  | `/screenshot` | — | Base64 PNG |
 | GET  | `/snapshot` | — | Accessibility tree (for agent navigation) |

@@ -68,7 +68,7 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_navigate` | Navigate to a URL |
 | `browser_eval` | Execute JavaScript in the page |
 | `browser_click` | Click an element by CSS selector |
-| `browser_type` | Type text into an element by CSS selector |
+| `browser_type` | Type text into an element by CSS selector. `submit: true` presses Enter afterwards — form fill + submit in one call. |
 | `browser_scroll` | Scroll the page or a specific element |
 | `browser_screenshot` | Capture page as PNG. `fullPage` for whole-document capture; `waitMs` to delay capture for in-flight CSS transitions. |
 | `browser_screenshot_slice` | Capture one viewport-height slice of a long page. For pages exceeding Chromium's single-PNG axis cap (~16k px). Pair with `browser_emulate` first. |
@@ -100,7 +100,7 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 | POST | `/navigate` | `{ url, tabId? }` | Navigate to URL |
 | POST | `/eval` | `{ expression, tabId? }` | Run JS in page context |
 | POST | `/click` | `{ selector, tabId? }` | Click element by CSS selector |
-| POST | `/type` | `{ selector, text, tabId? }` | Type into element |
+| POST | `/type` | `{ selector, text, submit?, tabId? }` | Type into element. `submit: true` presses Enter after typing. |
 | POST | `/scroll` | `{ deltaX, deltaY, selector?, tabId? }` | Scroll page or element |
 | GET | `/screenshot` | `?tabId=X&fullPage=true&waitMs=N` | Base64 PNG screenshot. `fullPage=true` captures beyond the viewport. `waitMs` sleeps before capture (handles CSS transitions). |
 | GET | `/screenshot-slice` | `?slice=N&tabId=X` | Viewport-height slice plus metadata. `slice` is 0-indexed; negative from end. Omit `slice` for metadata only. |

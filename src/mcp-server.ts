@@ -184,9 +184,10 @@ server.tool(
 	{
 		selector: z.string().describe('CSS selector of the input element'),
 		text: z.string().describe('Text to type'),
+		submit: z.boolean().optional().describe('Press Enter after typing (submits forms / search boxes in one call)'),
 		tabId: z.string().optional().describe(tabIdDescription),
 	},
-	async ({ selector, text, tabId }) => toMcpResult(await bridgePost('/type', { selector, text, tabId })),
+	async ({ selector, text, submit, tabId }) => toMcpResult(await bridgePost('/type', { selector, text, submit, tabId })),
 );
 
 // Scroll
