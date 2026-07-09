@@ -2,7 +2,7 @@
   "name": "integrated-browser-mcp",
   "displayName": "Integrated Browser MCP",
   "description": "Exposes VS Code's integrated browser to external agents (Claude Code, scripts, curl) via a local HTTP API and MCP server.",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "publisher": "thimo",
   "license": "MIT",
   "author": {
@@ -94,7 +94,10 @@
         "browserBridge.browserType": {
           "type": "string",
           "default": "editor-browser",
-          "enum": ["editor-browser", "chrome"],
+          "enum": [
+            "editor-browser",
+            "chrome"
+          ],
           "enumDescriptions": [
             "VS Code integrated browser (runs inside VS Code)",
             "External Chrome window (more reliable CDP support)"
