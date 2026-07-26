@@ -289,6 +289,21 @@ const section = name => console.log(`\n${name}`);
 	throws('rejects a non-PNG', () => decodePng(Buffer.from('definitely not a png')));
 }
 
+// ---------------------------------------------------------------- sharing
+{
+	section('normalizeUrl — the enforcement join key must not fold distinct pages together');
+	const { normalizeUrl: norm } = await load('src/sharing.ts');
+
+	// Origin is case-insensitive; path and query are NOT.
+	eq('lowercases the origin', norm('HTTPS://Example.COM/Path'), 'https://example.com/Path');
+	eq('keeps path case (Admin != admin)', norm('https://x.com/Admin') !== norm('https://x.com/admin'), true);
+	eq('keeps query case', norm('https://x.com/?t=AbC') !== norm('https://x.com/?t=abc'), true);
+	// Fragment is the same page; a trailing slash is not meaningful here.
+	eq('drops the fragment', norm('https://x.com/a#section'), norm('https://x.com/a'));
+	eq('drops a trailing slash', norm('https://x.com/a/'), norm('https://x.com/a'));
+	eq('preserves the query', norm('https://x.com/a?b=1'), 'https://x.com/a?b=1');
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
 	console.log(`${failures} FAILED`);

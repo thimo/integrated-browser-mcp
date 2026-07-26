@@ -7,7 +7,7 @@ import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
 import { discoverPages, isDiscoveryAvailable, isDiscoveryEnabled, type DiscoveredPage } from './lm-pages';
 import { hasProposedBrowserApi } from './cdp';
-import { isEnforcementEnabled, normalizeUrl, sharedUrls } from './sharing';
+import { isEnforcementEnabled, normalizeUrl, sharedUrls, enforceSharing as runEnforceSharing } from './sharing';
 import { decodePng, pixelAt } from './png';
 
 const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'allowAndName', 'deny', 'default']);
@@ -239,28 +239,10 @@ export class BridgeServer {
 	 * `browserBridge.enforceSharing` is on. Runs before tab-targeted work so a
 	 * revoked page cannot be driven through a `tabId` captured earlier.
 	 */
-	private async enforceSharing(): Promise<void> {
-		if (!isEnforcementEnabled()) return;
-		const { urls, available } = await sharedUrls(this.log);
-		for (const info of this.cdp.list()) {
-			const tab = this.cdp.getTab(info.tabId);
-			// Tabs the bridge opened are its own — always accessible, and the
-			// reason enforcement never blocks the agent from working.
-			if (!tab || tab.bridgeOwned) continue;
-			if (available && info.url && urls.has(normalizeUrl(info.url))) continue;
-			// With no sharing signal (Copilot/chat off, or VS Code < 1.131) the
-			// user has no way to *grant* access to their own tabs — there is no
-			// share button to press. Failing open would hand over everything
-			// they never consented to; failing fully closed would be useless.
-			// So the user's tabs stay off-limits and the agent works in tabs it
-			// opens itself, which needs no consent to express.
-			await this.cdp.revokeTab(
-				info.tabId,
-				available
-					? 'page no longer shared'
-					: 'sharing cannot be expressed in this VS Code (chat disabled or < 1.131), so only bridge-opened tabs are accessible',
-			);
-		}
+	private enforceSharing(): Promise<void> {
+		// Delegates to the shared implementation so the language-model tools
+		// honour the same access model (they previously bypassed it entirely).
+		return runEnforceSharing(this.cdp, this.log);
 	}
 
 	/**
@@ -277,18 +259,30 @@ export class BridgeServer {
 				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Browser Bridge: Stop). Set browserBridge.enforceSharing to make unsharing revoke.',
 			};
 		}
-		const { available } = await sharedUrls(this.log);
-		return available
-			? {
+		const { available, failed } = await sharedUrls(this.log);
+		if (available) {
+			return {
 				enforced: true,
 				mode: 'enforcing',
-				note: 'browserBridge.enforceSharing is on: the bridge drives only tabs it opened itself plus pages VS Code reports as shared. Unsharing detaches within ~2s and later calls on that tabId fail. Matching is by URL, so two tabs on the same URL are indistinguishable.',
-			}
-			: {
-				enforced: true,
-				mode: 'bridge-owned-only',
-				note: 'browserBridge.enforceSharing is on, but sharing cannot be expressed in this VS Code (needs 1.131+ and chat enabled) — there is no share button to press. The bridge therefore drives ONLY tabs it opened itself; the user\'s own tabs are not accessible and cannot be granted. Agents work normally here: browser_tab_open / browser_navigate create bridge-owned tabs. Enable chat if you need to grant access to your existing tabs.',
+				note: 'browserBridge.enforceSharing is on: the bridge drives only tabs it opened itself plus pages VS Code reports as shared. Unsharing detaches within ~2s and later calls on that tabId fail. Matching is by URL origin+path, so two tabs on the same URL are indistinguishable.',
 			};
+		}
+		if (failed) {
+			return {
+				enforced: true,
+				mode: 'degraded',
+				note: 'browserBridge.enforceSharing is on, but the sharing listing (list_browser_pages) is currently failing, so enforcement is paused (tabs are left as-is rather than mass-revoked). Check the output channel.',
+			};
+		}
+		// Not available and not a transient failure: name the real cause.
+		const cause = !isDiscoveryEnabled()
+			? 'browserBridge.lmPageDiscovery is off, so no sharing signal is read. Turn it on (needs VS Code 1.131+ with chat) to grant access to your existing tabs.'
+			: 'this VS Code build does not expose list_browser_pages (needs 1.131+ with chat enabled), so sharing cannot be expressed.';
+		return {
+			enforced: true,
+			mode: 'bridge-owned-only',
+			note: `browserBridge.enforceSharing is on, but ${cause} The bridge therefore drives ONLY tabs it opened itself; browser_tab_open / browser_navigate create those, so agents still work.`,
+		};
 	}
 
 	/**

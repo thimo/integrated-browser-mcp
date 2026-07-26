@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { CDPManager } from './cdp';
+import { enforceSharing } from './sharing';
 
 /**
  * Expose the bridge's *distinctive* capabilities to VS Code's own agent via
@@ -30,7 +31,10 @@ function textResult(value: unknown): vscode.LanguageModelToolResult {
 
 /** Newest-last slice, matching the HTTP endpoints' semantics. */
 function tail<T>(entries: T[], limit?: number): T[] {
-	const size = Math.max(1, Math.min(limit ?? 50, 200));
+	// Coerce and validate: a non-numeric limit ({"limit":"all"}) would make
+	// Math.min NaN and slice(-NaN) return the whole buffer — the opposite of a cap.
+	const n = Number(limit);
+	const size = Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 200) : 50;
 	return entries.slice(-size);
 }
 
@@ -54,6 +58,10 @@ export function registerLanguageModelTools(
 						if (!manager) {
 							return textResult('The Integrated Browser bridge is not running. Start it with "Browser Bridge: Start".');
 						}
+						// Honour enforceSharing here too: without this, Copilot could
+						// keep reading an unshared user tab's buffers/list via these
+						// tools while the HTTP layer revoked it.
+						await enforceSharing(manager, log).catch(err => log.appendLine(`[LM] enforcement failed: ${err}`));
 						return textResult(handler(options.input ?? {}));
 					},
 				}),

@@ -45,6 +45,12 @@ export interface DiscoveredPage {
 
 export interface PageDiscovery {
 	available: boolean;
+	/**
+	 * True only when the tool was invoked and errored/timed out (transient),
+	 * as opposed to being disabled or unsupported. Enforcement must not treat a
+	 * transient failure as "nothing is shared" and mass-revoke.
+	 */
+	failed?: boolean;
 	/** Why discovery is unavailable — omitted when `available` is true. */
 	reason?: string;
 	/** Hints for enabling it, when unavailable. */
@@ -241,7 +247,7 @@ export async function discoverPages(log?: vscode.OutputChannel): Promise<PageDis
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		log?.appendLine(`[LM] ${LIST_PAGES_TOOL} failed: ${message}`);
-		return { available: false, reason: message, pages: [], unsharedCount: 0 };
+		return { available: false, failed: true, reason: message, pages: [], unsharedCount: 0 };
 	} finally {
 		clearTimeout(timer);
 		cts.dispose();
