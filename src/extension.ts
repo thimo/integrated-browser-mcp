@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { CDPManager } from './cdp';
+import { CDPManager, hasProposedBrowserApi } from './cdp';
 import { BridgeServer } from './http-server';
 import { StatusBar } from './status-bar';
 
@@ -104,30 +104,42 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		statusBar.update(cdp.state, true, cdp.transport, summarizeTabs());
 
 		// 3. Wire BrowserTab lifecycle events when the proposed API is available.
+		//    Any failure here is downgraded to the fallback path rather than
+		//    failing startup: the bridge is fully functional without the
+		//    proposal (single tab, no worker events), so a proposal that is
+		//    declared but not granted must not take the whole bridge down.
+		let proposedApiWired = false;
 		if (hasProposedBrowserApi()) {
-			context.subscriptions.push(
-				vscode.window.onDidOpenBrowserTab(tab => {
-					// Ignore tabs we're about to open ourselves; adoptBrowserTab is idempotent.
-					cdp.adoptBrowserTab(tab).catch(err => {
-						log.appendLine(`[Bridge] adoptBrowserTab failed: ${err}`);
+			try {
+				context.subscriptions.push(
+					vscode.window.onDidOpenBrowserTab(tab => {
+						// Ignore tabs we're about to open ourselves; adoptBrowserTab is idempotent.
+						cdp.adoptBrowserTab(tab).catch(err => {
+							log.appendLine(`[Bridge] adoptBrowserTab failed: ${err}`);
+						});
+					}),
+					vscode.window.onDidCloseBrowserTab(tab => {
+						cdp.untrackBrowserTab(tab);
+						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
+					}),
+					vscode.window.onDidChangeActiveBrowserTab(tab => {
+						cdp.syncActive(tab);
+						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
+					}),
+				);
+				// Adopt any tabs already open at startup.
+				for (const existingTab of vscode.window.browserTabs) {
+					cdp.adoptBrowserTab(existingTab, existingTab === vscode.window.activeBrowserTab).catch(err => {
+						log.appendLine(`[Bridge] Startup adoptBrowserTab failed: ${err}`);
 					});
-				}),
-				vscode.window.onDidCloseBrowserTab(tab => {
-					cdp.untrackBrowserTab(tab);
-					statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
-				}),
-				vscode.window.onDidChangeActiveBrowserTab(tab => {
-					cdp.syncActive(tab);
-					statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
-				}),
-			);
-			// Adopt any tabs already open at startup.
-			for (const existingTab of vscode.window.browserTabs) {
-				cdp.adoptBrowserTab(existingTab, existingTab === vscode.window.activeBrowserTab).catch(err => {
-					log.appendLine(`[Bridge] Startup adoptBrowserTab failed: ${err}`);
-				});
+				}
+				proposedApiWired = true;
+			} catch (err) {
+				log.appendLine(`[Bridge] Proposed browser API declared but not granted, falling back: ${err}`);
 			}
-		} else {
+		}
+
+		if (!proposedApiWired) {
 			// Fallback: if a browser debug session is already active, adopt it.
 			const existingSession = vscode.debug.activeDebugSession && isBrowserSession(vscode.debug.activeDebugSession)
 				? vscode.debug.activeDebugSession
@@ -212,12 +224,6 @@ async function stopBridge(): Promise<void> {
 	await unregisterInstance();
 	statusBar?.update('disconnected', false, null, { count: 0 });
 	log?.appendLine('[Bridge] Stopped');
-}
-
-function hasProposedBrowserApi(): boolean {
-	// The `browser` proposed API adds `openBrowserTab` on vscode.window.
-	// Absent unless VS Code was launched with --enable-proposed-api=thimo.integrated-browser-mcp.
-	return typeof (vscode.window as unknown as { openBrowserTab?: unknown }).openBrowserTab === 'function';
 }
 
 async function launchBrowserViaProposedApi(): Promise<boolean> {

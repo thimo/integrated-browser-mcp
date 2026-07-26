@@ -20,6 +20,26 @@ function generateTabId(): string {
 }
 
 /**
+ * True when the `browser` API proposal is both declared *and granted*.
+ *
+ * Declaring it in package.json is not enough — VS Code only grants it in
+ * extension development mode or when launched with
+ * `--enable-proposed-api thimo.integrated-browser-mcp`. When declared but
+ * ungranted the members still exist on the namespace and throw on access, so a
+ * bare `typeof` probe reports a false positive. Probe a property too and treat
+ * any throw as "not available".
+ */
+export function hasProposedBrowserApi(): boolean {
+	try {
+		const win = vscode.window as unknown as { openBrowserTab?: unknown; browserTabs?: unknown };
+		if (typeof win.openBrowserTab !== 'function') return false;
+		return Array.isArray(win.browserTabs);
+	} catch {
+		return false;
+	}
+}
+
+/**
  * `(N) ` parenthesised decimal prefix. ASCII, high contrast, legible at any
  * tab width, no upper cap. Matches the status bar's `Browser MCP (N)` count
  * notation. Replaces earlier Unicode circled-digit approaches (outlined
@@ -140,7 +160,7 @@ export class CDPManager {
 	 * spawned on initial load can race our auto-attach and never get captured.
 	 */
 	async openTab(url: string, makeActive = true): Promise<CDPTab> {
-		if (typeof vscode.window.openBrowserTab !== 'function') {
+		if (!hasProposedBrowserApi()) {
 			throw new Error(
 				'Multi-tab requires VS Code to be launched with --enable-proposed-api=thimo.integrated-browser-mcp. See README.',
 			);
