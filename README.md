@@ -25,7 +25,7 @@ The extension uses VS Code's built-in `editor-browser` and the Chrome DevTools P
    ```bash
    code --install-extension thimo.integrated-browser-mcp
    ```
-2. The HTTP server starts automatically on `localhost:3788`
+2. The bridge starts automatically. Agents reach it over a unix socket (named pipe on Windows) at `~/.integrated-browser-mcp/sockets/` — set `browserBridge.transport` to `tcp` for the classic `localhost:3788` port instead
 3. For Claude Code: the MCP server is auto-configured in `~/.claude.json` on first activation
 4. The browser launches lazily on the first request — no browser tab until you need one
 
@@ -51,11 +51,16 @@ For browser automation, use the integrated-browser-mcp MCP tools (browser_naviga
 
 ### Usage with curl
 
+The bridge listens on a unix socket by default (see [Limitations and trust model](#limitations-and-trust-model) for why):
+
 ```bash
-curl -X POST http://127.0.0.1:3788/navigate \
+curl --unix-socket ~/.integrated-browser-mcp/sockets/<id>.sock \
+  -X POST http://localhost/navigate \
   -H 'Content-Type: application/json' \
   -d '{"url":"http://localhost:3000"}'
 ```
+
+The exact socket path is in `~/.integrated-browser-mcp/instances/<hash>.json`. Prefer a plain TCP port? Set `browserBridge.transport` to `"tcp"` and use `http://127.0.0.1:3788` like before.
 
 See [HTTP API](#http-api) below for the full endpoint list.
 
@@ -73,7 +78,7 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_screenshot` | Capture page as PNG. `fullPage` for whole-document capture; `waitMs` to delay capture for in-flight CSS transitions. |
 | `browser_screenshot_slice` | Capture one viewport-height slice of a long page. For pages exceeding Chromium's single-PNG axis cap (~16k px). Pair with `browser_emulate` first. |
 | `browser_emulate` | Override viewport dimensions, DPR, mobile flag, and User-Agent. Sticky until `reset:true`. |
-| `browser_pixel` | Read the on-screen colour at a point or element centre, as numbers. Works on WebGL canvases where in-page readback returns black — see [Sampling colours](#sampling-colours). |
+| `browser_pixel` | Read the on-screen colour at a point or element centre, as numbers — sampled from the composited screenshot, so it works on WebGL canvases where in-page readback returns black. |
 | `browser_snapshot` | Get the accessibility tree as a compact pruned projection. Scope with `selector`, filter with `interactiveOnly`, cap with `limit`; `full: true` returns the raw CDP nodes. |
 | `browser_dom` | Get the full page HTML |
 | `browser_markdown` | Extract page content as markdown (lightweight DOM walker, not Turndown). Pass `outputPath` to write to disk instead of returning the body — workspace-scoped. |
@@ -87,8 +92,8 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_tab_close` | Close a tab by id |
 | `browser_tab_list` | List open tabs with their ids, URLs, titles, and active flag |
 | `browser_tab_activate` | Set the default target tab |
-| `browser_pages_discover` | List integrated browser pages VS Code knows about, including ones the bridge isn't attached to. Requires VS Code 1.131+ — see [Page discovery](#page-discovery-vs-code-1131). |
-| `browser_status` | Check bridge connection status |
+| `browser_pages_discover` | List integrated browser pages VS Code knows about, including ones the bridge isn't attached to. Needs VS Code 1.131+ and `browserBridge.lmPageDiscovery` (off by default until that path is verified). |
+| `browser_status` | Check bridge connection status, including a `capabilities` block reporting what this build supports |
 
 ## HTTP API
 
@@ -121,150 +126,17 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 | POST | `/tab/close/:tabId` | — | Close a tab |
 | POST | `/tab/activate/:tabId` | — | Set the active (default) tab |
 | POST | `/pixel` | `{ selector?, points?, waitMs?, tabId? }` | Sample on-screen colour(s). `selector` samples that element's centre; `points` are page coordinates in CSS pixels. Returns `{ samples: [{ hex, r, g, b, a, x, y }] }`. |
-| GET | `/pages` | — | Integrated browser pages known to VS Code, including unattached ones. Returns `{ available, pages[], unsharedCount, reason?, requires? }`. See [Page discovery](#page-discovery-vs-code-1131). |
+| GET | `/pages` | — | Integrated browser pages known to VS Code, including unattached ones. Needs VS Code 1.131+ and `browserBridge.lmPageDiscovery`. |
 
-## Knowing what your build supports
+## Multi-window support and endpoint discovery
 
-Multi-tab depends on the `browser` API proposal, which VS Code only *grants* when launched with `--enable-proposed-api thimo.integrated-browser-mcp` (or in extension development mode). Declaring it in the manifest is not enough. `GET /status` reports what is actually available:
-
-```json
-{ "capabilities": { "tabOpen": false, "attachExistingPages": false, "multiTab": false,
-                    "reason": "the `browser` API proposal is declared but not granted; …" },
-  "attachablePages": 1 }
-```
-
-Without the proposal the bridge **cannot attach to a page the user already opened** — there is no CDP handle for it. Lazy-launch is the attach mechanism: call `browser_navigate` with no `tabId` and the bridge creates and connects its own single tab. That opens a separate page rather than taking over the user's, so an empty `browser_tab_list` never means the browser is unreachable.
-
-### Enabling the proposal permanently
-
-Rather than passing a flag on every launch, add it once to your runtime arguments (Command Palette → **Preferences: Configure Runtime Arguments**), then fully quit and restart VS Code — `argv.json` is read at process start, so *Reload Window* is not enough:
-
-```jsonc
-{
-  "enable-proposed-api": ["thimo.integrated-browser-mcp"]
-}
-```
-
-This works on **stable** as well as Insiders. The file is per-install, so each needs its own entry:
-
-| Install | Path |
-|---|---|
-| Stable | `~/.vscode/argv.json` — Windows: `%USERPROFILE%\.vscode\argv.json` |
-| Insiders | `~/.vscode-insiders/argv.json` — Windows: `%USERPROFILE%\.vscode-insiders\argv.json` |
-
-Verify it took effect with `browser_status`: expect `capabilities.browserProposal: true` and `transport: "browserTab"`. Seeing `"websocket"` means the grant did not apply and the bridge is on the debug-session fallback.
-
-Running from source (`F5`) grants proposed APIs automatically, so no `argv.json` entry is needed for development.
-
-### Capability matrix
-
-Two independent switches decide what works: whether the **`browser` API proposal** is granted, and whether **chat is enabled on VS Code 1.131+** (the only source of page-sharing state).
-
-| | `browser` proposal | Chat + VS Code ≥ 1.131 | Reachable on |
-|---|---|---|---|
-| **A** | granted | enabled | Insiders |
-| **B** | granted | off / older | **stable + Insiders** |
-| **C** | not granted | enabled | Insiders |
-| **D** | not granted | off / older | **stable + Insiders** |
-
-Two things are easy to conflate here, and they ship on different schedules:
-
-- **The `browser` proposal is already in stable** — it has been present since 1.112. Only the *grant* is opt-in, via the `argv.json` entry below. Multi-tab and attaching to your own tabs are therefore available on stable today; they are not an Insiders feature.
-- **`list_browser_pages` is not.** It landed for 1.131 ([microsoft/vscode#326976](https://github.com/microsoft/vscode/pull/326976)), and current stable is 1.130 — so page discovery is unavailable there and scenarios **A** and **C** require Insiders.
-
-A practical consequence for stable users: because the tool does not exist, chat state is irrelevant to this extension on stable. Enabling or disabling Copilot changes nothing, and `browserBridge.lmPageDiscovery` can be set to `false` to skip the feature probe entirely. Nothing needs changing when 1.131 reaches stable — discovery is feature-detected at runtime and lights up on its own.
-
-| Capability | A | B | C | D |
-|---|:--:|:--:|:--:|:--:|
-| `browser_navigate` (lazy-launch) | ✅ | ✅ | ✅ | ✅ |
-| `browser_eval` / click / type / scroll | ✅ | ✅ | ✅ | ✅ |
-| screenshot / dom / markdown / snapshot | ✅ | ✅ | ✅ | ✅ |
-| console / network / downloads buffers | ✅ | ✅ | ✅ | ✅ |
-| `browser_emulate` (viewport / DPR / UA) | ✅ | ✅ | ✅ | ✅ |
-| `browser_tab_open` (multi-tab) | ✅ | ✅ | ❌ | ❌ |
-| Attach to tabs the **user** opened | ✅ | ✅ | ❌ | ❌ |
-| Worker / service-worker events | ✅ | ✅ | partial | partial |
-| `browser_pages_discover` | ✅ | ❌ | ✅ | ❌ |
-| `attachedTabId` cross-reference | ✅ | ❌ | ❌¹ | ❌ |
-| `enforceSharing` can enforce | ✅ | ❌² | ✅³ | ❌² |
-| Unsharing revokes access | ✅⁴ | ❌ | ✅³ | ❌ |
-| Debug toolbar shown per tab | none | none | shown | shown |
-| `status.degraded` | `false` | `false` | **`true`** | **`true`** |
-| `status.transport` | `browserTab` | `browserTab` | `websocket` | `websocket` |
-| Tabs drivable | all in window | all in window | 1 (`tab-main`) | 1 (`tab-main`) |
-
-¹ Discovery lists the page but the bridge cannot attach to it — surfaced via `hint` and `degraded` rather than left to be inferred.
-² Falls back to bridge-owned-only, not fail-open. See below.
-³ Enforceable, but only over the single bridge tab.
-⁴ Requires `browserBridge.enforceSharing`.
-
-The proposal is the deciding switch: it controls multi-tab, attaching to your tabs, worker events, and whether debug toolbars appear. Chat only affects the discovery/sharing layer — **disabling Copilot costs you page discovery, never browser control**.
-
-### Access model
-
-Orthogonal to the above, `browserBridge.enforceSharing` decides who the bridge may drive. `GET /status` reports the resolved mode, so it never claims a guarantee it is not providing:
-
-| `enforceSharing` | Sharing signal | `sharing.mode` | Agent may drive |
-|---|---|---|---|
-| `false` *(default)* | — | `off` | Every attachable tab, shared or not. Unsharing does nothing. |
-| `true` | available (A / C) | `enforcing` | Bridge-opened tabs + shared pages. Unsharing detaches within ~2s; later calls on that `tabId` fail. |
-| `true` | absent (B / D) | `bridge-owned-only` | Only tabs the bridge opened. Yours stay off-limits and cannot be granted — there is no share button to press. |
-
-### Transport
-
-Independent of everything above. The bridge prefers a unix socket (or Windows named pipe) so no TCP port is opened at all; see `browserBridge.transport`.
-
-| Setup | Socket / pipe | Notes |
-|---|:--:|---|
-| VS Code local (Windows/macOS/Linux) | ✅ | named pipe on Windows |
-| WSL remote | ✅ | extension host and client both inside WSL |
-| Dev Container | ✅ | both inside the container — simpler than TCP, no port forwarding |
-| Client and extension host on **different** filesystems | ❌ | set `browserBridge.transport` to `tcp` and `BROWSER_BRIDGE_PORT`; instance discovery does not span that boundary either |
-
-## Marking agent-controlled tabs
-
-`browserBridge.tabIndicator` controls how a tab under agent control is marked:
-
-| Value | Effect |
-|---|---|
-| `number` *(default)* | Prefix `(N) ` — lets you say "reload browser 2" and match `browser_tab_list`'s `number` |
-| `marker` | Prefix a fixed symbol (`browserBridge.tabIndicatorText`, default `● `) — shows the tab is agent-controlled without implying an ordering that renumbers as tabs come and go |
-| `off` | Never modify tab titles |
-
-**Only tabs the bridge opened itself are marked.** The bridge attaches to every integrated browser tab in the window, so marking on adoption used to stamp a prefix onto pages *you* had opened — your page, your title, modified because an unrelated tool happened to be running. Pages you open are now left alone regardless of this setting.
-
-Marking works by rewriting the page's real `document.title` through an injected script, since that is the only lever an extension has over the editor tab label. The page can therefore observe it: choose `off` if a page or tool needs the unmodified title — for example when reading it back via `browser_eval`, or in a test that asserts on `document.title`. Changing the setting takes effect immediately; switching to `off` restores the original titles rather than leaving them modified.
-
-The `number` in `browser_tab_list` is always present regardless of this setting.
-
-## Page discovery (VS Code 1.131+)
-
-The bridge can only drive tabs it has attached to. On the proposed-API path that's every integrated browser tab in the window; on the debug-session fallback it's just the one tab the bridge launched. Neither sees pages the *user* opened, or pages owned by another window.
-
-`browser_pages_discover` / `GET /pages` closes that blind spot by asking VS Code directly, via its built-in [`list_browser_pages`](https://github.com/microsoft/vscode/pull/326976) language model tool (`vscode.lm.invokeTool`). Use it when `browser_tab_list` looks empty but the user insists a page is open.
-
-Each returned page carries a VS Code `pageId` — **not** a bridge `tabId`; the two namespaces are unrelated. Where the bridge already drives the same URL, the entry also gets an `attachedTabId`. Only pages with an `attachedTabId` can be acted on by the other `browser_*` tools.
-
-Requirements — when unmet, the call returns `{ available: false, reason, requires }` and everything else keeps working:
-
-- VS Code **1.131+** (Insiders at time of writing)
-- Chat enabled and signed in
-- `"chat.agent.enabled": true`
-- `"workbench.browser.enableChatTools": true`
-
-Set `"browserBridge.lmPageDiscovery": false` to disable the integration entirely.
-
-This is deliberately discovery-only. Everything the bridge actually *does* to a page stays on CDP: VS Code's browser tools have no equivalent for buffered console/network, downloads, or device emulation, and their `run_playwright_code` is one-shot so it can't hold event listeners. Discovery is also the one browser tool that declares no confirmation prompt, so it needs no auto-approve setting — unlike `open_browser_page` / `navigate_page` / `run_playwright_code`, which raise a modal when invoked outside a chat session unless `chat.tools.global.autoApprove` is set.
-
-## Multi-window support and port discovery
-
-Each VS Code window gets its own browser and HTTP server. Ports are assigned automatically starting from 3788 and incrementing if already taken.
+Each VS Code window gets its own browser and its own bridge endpoint — a per-workspace socket path, or a port assigned automatically from 3788 upward on the TCP transport.
 
 ### How the MCP server finds the right window
 
 When Claude Code calls a browser tool, the MCP server needs to know which VS Code window to talk to. It resolves this automatically:
 
-1. Each VS Code window registers itself at `~/.integrated-browser-mcp/instances/<hash>.json` with its port, workspace path, and PID
+1. Each VS Code window registers itself at `~/.integrated-browser-mcp/instances/<hash>.json` with its endpoint (socket path or port), workspace path, and PID
 2. The MCP server reads all instance files and filters out dead processes
 3. It matches `process.cwd()` (Claude Code's working directory) against registered workspace paths — deepest match wins
 4. If no workspace matches, it falls back to the most recently started instance
@@ -273,7 +145,7 @@ This means when you run Claude Code inside a VS Code terminal, it automatically 
 
 ### Manual override
 
-Set the `BROWSER_BRIDGE_PORT` environment variable to force a specific port:
+Force a specific endpoint with an environment variable — `BROWSER_BRIDGE_SOCKET` for a socket path, or `BROWSER_BRIDGE_PORT` for a TCP port:
 
 ```bash
 BROWSER_BRIDGE_PORT=3789 claude
@@ -301,6 +173,8 @@ To enable it, launch VS Code with the proposed API flag:
 code --enable-proposed-api=thimo.integrated-browser-mcp
 ```
 
+Or grant it permanently without a flag: Command Palette → **Preferences: Configure Runtime Arguments**, add `"enable-proposed-api": ["thimo.integrated-browser-mcp"]`, then fully quit and restart VS Code — `argv.json` is read at process start, so *Reload Window* is not enough. Works on stable as well as Insiders.
+
 The extension feature-detects the proposal at startup and uses it if available. Without the flag, the bridge falls back to the debug-session path and works exactly like before — so setting the flag is optional and safe.
 
 Check which path you're on via the status bar tooltip (`Browser MCP: Connected (proposed)` vs `(debug-session)`), or `GET /status` → `transport: "browserTab"` vs `"websocket"`.
@@ -318,6 +192,8 @@ Multi-tab support requires the proposed API (previous section). When enabled:
 - Closing a tab in the VS Code UI is picked up automatically; the bridge untracks it and the `tabId` becomes invalid.
 
 The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. The bridge strips any prefix a prior version of the extension may have left on a pre-existing tab, so you won't see stacked markers after an upgrade.
+
+**Only tabs the bridge opened itself are numbered and marked** — pages you open yourself are adopted (and drivable) but their titles are never touched, and their `number` is `null`. `browserBridge.tabIndicator` tunes the marking: `number` (default), `marker` (a fixed symbol via `browserBridge.tabIndicatorText`, no ordering implied), or `off`. The prefix rewrites the page's real `document.title`, so the page can observe it — choose `off` if a page or tool needs the unmodified title.
 
 On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
 
@@ -342,7 +218,8 @@ Caveats:
 
 ## Limitations and trust model
 
-- HTTP server binds to `127.0.0.1` only — never network-exposed. No authentication, same trust model as VS Code's built-in terminals.
+- The bridge listens on a unix socket / named pipe with owner-only permissions by default — nothing is bound to a network interface, no port to scan, and other local users can't connect. On `browserBridge.transport: "tcp"` it binds `127.0.0.1` only, with no authentication — reachable by any local process, same trust model as VS Code's built-in terminals.
 - `/eval` runs arbitrary JavaScript in the open page — same trust model as the DevTools console. Don't pass untrusted input.
+- VS Code's page-sharing toggle does not govern this bridge by default: it drives every tab it can attach to. The opt-in `browserBridge.enforceSharing` setting makes sharing the access model (needs VS Code 1.131+ with chat enabled plus `browserBridge.lmPageDiscovery`; without that signal the bridge restricts itself to tabs it opened itself).
 - On the debug-session path (default, no proposed-API flag): only one tab, web worker and service worker events not captured, and the debug toolbar / "(1)" badge appears while the browser is active.
 - The browser tab lives in the VS Code editor area. Moving it to a side panel is fine; closing it disconnects CDP.
