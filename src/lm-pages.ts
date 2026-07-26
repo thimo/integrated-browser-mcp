@@ -92,9 +92,9 @@ export function isDiscoveryAvailable(): boolean {
 	return lm.tools.some(tool => tool.name === LIST_PAGES_TOOL);
 }
 
-/** True when the user has not opted out via `browserBridge.lmPageDiscovery`. */
+/** True when the user has opted in via `browserBridge.lmPageDiscovery`. Off by default until the 1.131 path has been verified first-hand. */
 export function isDiscoveryEnabled(): boolean {
-	return vscode.workspace.getConfiguration('browserBridge').get<boolean>('lmPageDiscovery', true);
+	return vscode.workspace.getConfiguration('browserBridge').get<boolean>('lmPageDiscovery', false);
 }
 
 /**

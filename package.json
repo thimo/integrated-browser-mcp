@@ -143,12 +143,12 @@
         "browserBridge.enforceSharing": {
           "type": "boolean",
           "default": false,
-          "description": "Treat VS Code's page sharing as the bridge's access model: drive only tabs the bridge opened itself, plus pages the user has shared. Unsharing then detaches the bridge (within ~2s) and later calls on that tab fail. Sharing state comes from VS Code 1.131+ with chat enabled — the only signal the browser API exposes. Where sharing cannot be expressed (chat disabled or older VS Code), the bridge restricts itself to tabs it opened rather than granting access to everything: agents still work normally, but your existing tabs stay off-limits. Matching is by URL, so two tabs on the same URL are indistinguishable. Off by default: without it, unsharing does NOT revoke access."
+          "description": "Treat VS Code's page sharing as the bridge's access model: drive only tabs the bridge opened itself, plus pages the user has shared. Unsharing then detaches the bridge (within ~2s) and later calls on that tab fail. Sharing state comes from VS Code 1.131+ with chat enabled — the only signal the browser API exposes. Where sharing cannot be expressed (chat disabled or older VS Code), the bridge restricts itself to tabs it opened rather than granting access to everything: agents still work normally, but your existing tabs stay off-limits. Matching is by URL, so two tabs on the same URL are indistinguishable. Requires browserBridge.lmPageDiscovery to see shared pages — with discovery off, only bridge-opened tabs are allowed. Off by default: without it, unsharing does NOT revoke access."
         },
         "browserBridge.lmPageDiscovery": {
           "type": "boolean",
-          "default": true,
-          "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds."
+          "default": false,
+          "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds. Off by default. Note: browserBridge.enforceSharing needs this to see shared pages — with discovery off, enforcement can only allow tabs the bridge opened itself."
         },
         "browserBridge.browserType": {
           "type": "string",
@@ -278,8 +278,7 @@
     "publish:marketplace": "vsce publish --allow-proposed-apis browser",
     "release": "scripts/release.sh",
     "test:unit": "node tests/unit.mjs",
-    "pretest": "npm run package",
-    "test:integration": "vscode-test"
+    "pretest": "npm run package"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
