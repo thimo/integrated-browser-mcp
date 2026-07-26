@@ -34,28 +34,28 @@ Feature-detected at runtime, so `engines.vscode` stays at `^1.112.0` and older b
 
 This is discovery-only; the CDP path still backs every action. VS Code's browser tools have no equivalent for buffered console/network, downloads, or emulation, and `run_playwright_code` is one-shot so it cannot hold event listeners. Context: [thimo/vscode-integrated-browser-mcp#5](https://github.com/thimo/vscode-integrated-browser-mcp/issues/5).
 
-## [0.6.1] — 2026-07-26
+## [0.6.1] - 2026-07-26
 
 ### Fixed
 - Bridge no longer crashes at startup on VS Code builds where the `browser` API proposal is declared but not granted (e.g. 1.130 stable, which strips non-allowlisted `enabledApiProposals` from Marketplace installs). Newer VS Code exposes the ungranted members as stubs that throw on access, so the old `typeof vscode.window.openBrowserTab` feature-detection false-positived and the startup event wiring then threw `CANNOT use API proposal: browser`, taking the whole bridge down (#7). Detection now probes an actual property access and treats any throw as "not available", and the startup wiring additionally downgrades to the debug-session fallback path on failure instead of failing to start.
 
 
-## [0.6.0] — 2026-07-09
+## [0.6.0] - 2026-07-09
 
 ### Added
 - `browser_type` now accepts `submit: true` to press Enter after typing — form fill + submit in one tool call instead of a `browser_type` + `browser_eval` round-trip. Mirrors the `submit` parameter Copilot's `typeInPage` tool gained in VS Code 1.124. Implemented as `Input.dispatchKeyEvent` keyDown (with `text: '\r'`, so form submission actually fires) + keyUp after the existing `Input.insertText`; response now reports `{ typed, submitted }`.
 
-## [0.5.3] — 2026-05-20
+## [0.5.3] - 2026-05-20
 
 ### Changed
 - Icon viewBox tightened to remove the ~10% transparent margin around the rounded square. The Marketplace doesn't mask icons into a safe-area, so the padding just made the artwork render smaller than its neighbors in the listing grid.
 
-## [0.5.2] — 2026-05-20
+## [0.5.2] - 2026-05-20
 
 ### Changed
 - Icon re-rendered at 1024×1024 (was 128×128) so the Marketplace listing and zoomed views stay sharp on retina displays. PNG source is `media/icon.svg`.
 
-## [0.5.1] — 2026-04-27
+## [0.5.1] - 2026-04-27
 
 ### Added
 - New `browser_download_set` and `browser_downloads` tools for headless downloads. By default the integrated browser shows a native save dialog when a page initiates a download — fine for a human, fatal for an agent. `browser_download_set` configures Chromium to save to a directory instead (default `<workspace>/tmp/downloads`, workspace-scoped exactly like `browser_markdown`'s `outputPath`); `browser_downloads` exposes a 50-entry circular buffer of `downloadWillBegin` / `downloadProgress` events so the agent learns the suggested filename and can poll for `state:"completed"`. Behavior is opt-in — no VS Code setting, no auto-call on activation — so humans using the integrated browser keep the normal save dialog until the agent flips the switch. Supports all four CDP behaviors (`allow`, `allowAndName`, `deny`, `default`); `default` restores the dialog when done.
@@ -64,7 +64,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
     2. **`Page.downloadWillBegin` / `Page.downloadProgress`, not `Browser.*`.** Same story for events: only the `Page.*` variants fire on this transport. The handler listens to both and dedupes by GUID so future Chromium versions that emit both don't double-count.
     3. **`Browser.*` added to the `JsDebug.subscribe` allowlist** on the websocket-fallback transport too, so the best-effort `Browser.*` call's events would flow if the upstream proxy ever starts forwarding them.
 
-## [0.5.0] — 2026-04-27
+## [0.5.0] - 2026-04-27
 
 ### Added
 - `browser_screenshot` now accepts `fullPage: true` to capture the entire scrollable page (maps to CDP's `captureBeyondViewport`). The integrated browser pane is usually narrow, so viewport-only screenshots lose everything below the fold — full-page is what most agent workflows actually want.
@@ -74,7 +74,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 - New `browser_screenshot_slice` tool: captures one viewport-height slice of a long page plus metadata (`totalSlices`, `scrollHeight`, `viewportHeight`). Designed for AI consumers of tall pages where Chromium's single-PNG axis cap (~16,384 px) makes full-page capture fail, and where compressing 60k-px-tall content to a thumbnail loses the detail a vision model needs. Agents call once with no `slice` to learn the page shape, then request specific indices — `slice: 0` for the header, `slice: -1` for the footer (negative indices count from the end). Pairs naturally with `browser_emulate` (set the viewport, then slice through it).
 - New `browser_markdown` tool: extracts page content as markdown via a pure-JS DOM walker injected into the page (~80 lines, no Readability/Turndown, no deps). Optional `selector` param scopes extraction (defaults to `main`, falls back to `body`). Headings, links, code, pre-blocks, lists, blockquotes, and images are all preserved. Two non-obvious refinements forced by real-world docs sites (Apple Developer in particular): (1) link text is trimmed before bracketing so `<a> View </a>` becomes `[View](...)` rather than `[ View ](...)`; (2) adjacent inline siblings with no source-side whitespace get a synthetic separator so platform-availability runs like `<span>iOS 13.0+</span><span>iPadOS 13.0+</span>` don't render as `iOS 13.0+iPadOS 13.0+`. Optional `outputPath` (absolute or workspace-relative) writes the markdown to disk and returns only `Saved N bytes to <path>` — built for bulk archival where the body would otherwise flow through the agent's context. Paths are scoped to the open workspace folder; outside-workspace paths are rejected. Symlinks inside the workspace are not followed.
 
-## [0.4.1] — 2026-04-24
+## [0.4.1] - 2026-04-24
 
 ### Added
 - MCP server now sends a top-level `instructions` field on connect describing the integration (browser lives inside VS Code, numbered tabs, which tool is cheap vs expensive). Clients that honour the MCP spec's instructions field surface this to the model automatically.
@@ -86,7 +86,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
   - The new title script detects the pattern: if it sets the title more than 10 times within a second, it disconnects its own observer and backs off. The losing tab keeps whatever prefix the rival observer sets; the page stays responsive. Freshly-opened tabs (post-upgrade) are unaffected.
   - Also adds a per-process ownership marker (`window.__bridgeOwner`) used atomically at adopt time, as defence-in-depth for any future scenario where two 0.4.1+ instances could race on the same page. The marker is released on disconnect so a reloaded window cleanly reclaims its tabs.
 
-## [0.4.0] — 2026-04-24
+## [0.4.0] - 2026-04-24
 
 ### Added
 - **Multi-tab support** (proposed-API path only — requires `--enable-proposed-api=thimo.integrated-browser-mcp`).
@@ -105,7 +105,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 ### Removed
 - `POST /tabs/:id/activate` legacy endpoint (used CDP target ids that weren't stable across restarts). Replaced by `POST /tab/activate/:tabId` with our tab ids.
 
-## [0.3.0] — 2026-04-23
+## [0.3.0] - 2026-04-23
 
 ### Added
 - Optional support for VS Code's proposed `browser` API ([microsoft/vscode#300319](https://github.com/microsoft/vscode/issues/300319)). When the extension is launched with `--enable-proposed-api=thimo.integrated-browser-mcp`, the bridge uses `vscode.window.openBrowserTab` + `BrowserTab.startCDPSession` instead of a debug session, bypassing `vscode-js-debug`'s CDP proxy. This makes web worker and service worker events (console + network) flow into `/console` and `/network`, tagged with `target: "worker"` / `"service_worker"`. No debug toolbar or Run & Debug badge in this mode.
@@ -120,7 +120,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 ### Fixed
 - Handshake-only CDP sessions (browser + primary page) are no longer reported as child sessions in `/status.children`, and their events no longer get a `target` field. Only true child sessions (workers, iframes) are tagged.
 
-## [0.2.0] — 2026-04-23
+## [0.2.0] - 2026-04-23
 
 ### Fixed
 - Console and network buffers were silently empty. vscode-js-debug's CDP proxy only forwards events the client has explicitly subscribed to; the bridge never subscribed. Now calls `JsDebug.subscribe` for `Runtime.*`, `Network.*`, `Target.*`, and `Page.*` on connect.
@@ -135,7 +135,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 ### Changed
 - Minimum VS Code version bumped from 1.110 to 1.112, where [`editor-browser` became a first-class stable debug type](https://github.com/microsoft/vscode-js-debug/pull/2329) with supported `launch` + `attach`.
 
-## [0.1.0] — 2026-04-10
+## [0.1.0] - 2026-04-10
 
 Initial public release.
 
