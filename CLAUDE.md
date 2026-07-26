@@ -73,7 +73,7 @@ All responses: `{ ok: true, data: ... }` or `{ ok: false, error: "..." }`
 | POST | `/type` | `{ selector, text, submit? }` | Type into element; `submit: true` presses Enter after |
 | POST | `/scroll` | `{ deltaX, deltaY, selector? }` | Scroll |
 | GET  | `/screenshot` | — | Base64 PNG |
-| GET  | `/snapshot` | — | Accessibility tree (for agent navigation) |
+| GET  | `/snapshot` | — | Accessibility tree, pruned + projected by default (`selector`, `interactiveOnly`, `limit`; `full=true` for the raw CDP nodes) |
 | GET  | `/dom` | — | Full page outer HTML |
 | GET  | `/console` | `?limit=N` | Buffered console output |
 | GET  | `/network` | `?limit=N&filter=x` | Buffered network requests |

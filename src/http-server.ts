@@ -60,6 +60,14 @@ function axText(field?: { value?: unknown }): string | undefined {
 	return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+/** Like axText but keeps numbers too — a slider/spinbutton value arrives as a number. */
+function axScalar(field?: { value?: unknown }): string | number | undefined {
+	const value = field?.value;
+	if (typeof value === 'string' && value !== '') return value;
+	if (typeof value === 'number') return value;
+	return undefined;
+}
+
 /** Restrict a flat AX node list to `rootId` and everything beneath it. */
 export function descendantsOf(nodes: RawAXNode[], rootId: string): RawAXNode[] {
 	const byId = new Map(nodes.map(node => [node.nodeId, node]));
@@ -73,7 +81,10 @@ export function descendantsOf(nodes: RawAXNode[], rootId: string): RawAXNode[] {
 		const node = byId.get(id);
 		if (!node) continue;
 		out.push(node);
-		for (const child of node.childIds ?? []) stack.push(child);
+		// Push children reversed so the LIFO stack pops them in document order;
+		// a straight push would emit each level's last child first.
+		const kids = node.childIds ?? [];
+		for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
 	}
 	return out;
 }
@@ -107,14 +118,19 @@ export function projectAXNodes(
 		const entry: Record<string, unknown> = { nodeId: node.nodeId };
 		if (role) entry.role = role;
 		if (name) entry.name = name;
-		const value = axText(node.value);
-		if (value) entry.value = value;
+		const value = axScalar(node.value);
+		if (value !== undefined) entry.value = value;
 		const description = axText(node.description);
 		if (description) entry.description = description;
 
 		for (const prop of node.properties ?? []) {
 			if (!KEPT_PROPERTIES.has(prop.name)) continue;
-			const propValue = prop.value?.value;
+			let propValue = prop.value?.value;
+			// CDP sends tristate props (checked/pressed) as strings, not booleans.
+			// Normalise so `checked:"false"` is dropped like a boolean false and a
+			// consumer never reads the truthy string "false" as checked.
+			if (propValue === 'true') propValue = true;
+			else if (propValue === 'false') propValue = false;
 			// Skip the defaults — `disabled: false` on every node is pure noise.
 			if (propValue === false || propValue === undefined || propValue === '') continue;
 			entry[prop.name] = propValue;
@@ -936,7 +952,11 @@ export class BridgeServer {
 				const includeIgnored = req.query.includeIgnored === 'true';
 				const interactiveOnly = req.query.interactiveOnly === 'true';
 				const selector = req.query.selector as string | undefined;
-				const limit = Math.max(1, Number(req.query.limit) || 1500);
+				// Explicit parse: a non-numeric or non-positive limit falls back to
+				// the default (not silently to 1500 via `|| `), and an upper cap
+				// keeps a huge value from defeating the point of the projection.
+				const rawLimit = Number(req.query.limit);
+				const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 5000) : 1500;
 
 				let rootId: string | undefined;
 				if (selector) {
@@ -954,6 +974,13 @@ export class BridgeServer {
 						fetchRelatives: false,
 					}) as { nodes: RawAXNode[] };
 					rootId = partial.nodes?.[0]?.nodeId;
+					// The element exists in the DOM but has no accessibility node
+					// (display:none, aria-hidden). Fail rather than silently fall
+					// through to the whole-page tree the caller didn't ask for.
+					if (!rootId) {
+						res.json({ ok: false, error: `Selector matched an element with no accessibility node: ${selector}` });
+						return;
+					}
 				}
 
 				const tree = await resolved.tab.send('Accessibility.getFullAXTree') as { nodes: RawAXNode[] };

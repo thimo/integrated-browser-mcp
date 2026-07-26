@@ -148,6 +148,22 @@ const section = name => console.log(`\n${name}`);
 	eq('descendantsOf includes root and children', descendantsOf(nodes, '3').map(n => n.nodeId), ['3', '4']);
 	eq('descendantsOf tolerates an unknown root', descendantsOf(nodes, 'nope'), []);
 	eq('descendantsOf survives a cyclic tree', descendantsOf([{ nodeId: 'a', childIds: ['b'] }, { nodeId: 'b', childIds: ['a'] }], 'a').map(n => n.nodeId), ['a', 'b']);
+	// Siblings must come back in document order, not reversed by the LIFO stack.
+	const ordered = [{ nodeId: 'r', childIds: ['a', 'b', 'c'] }, { nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }];
+	eq('descendantsOf preserves sibling order', descendantsOf(ordered, 'r').map(n => n.nodeId), ['r', 'a', 'b', 'c']);
+
+	// Tristate props arrive as strings; "false" must drop like a boolean false,
+	// "true" must normalise to a boolean, and a numeric value must survive.
+	const tri = [
+		{ nodeId: 'c1', role: v('checkbox'), name: v('A'), properties: [{ name: 'checked', value: v('false') }] },
+		{ nodeId: 'c2', role: v('checkbox'), name: v('B'), properties: [{ name: 'checked', value: v('true') }] },
+		{ nodeId: 'c3', role: v('checkbox'), name: v('C'), properties: [{ name: 'checked', value: v('mixed') }] },
+		{ nodeId: 's1', role: v('slider'), name: v('Vol'), value: v(42) },
+	];
+	eq('drops tristate "false"', project(tri)[0], { nodeId: 'c1', role: 'checkbox', name: 'A' });
+	eq('normalises tristate "true" to boolean', project(tri)[1], { nodeId: 'c2', role: 'checkbox', name: 'B', checked: true });
+	eq('keeps tristate "mixed"', project(tri)[2], { nodeId: 'c3', role: 'checkbox', name: 'C', checked: 'mixed' });
+	eq('keeps a numeric value', project(tri)[3], { nodeId: 's1', role: 'slider', name: 'Vol', value: 42 });
 
 	// The point of the exercise: framework wrappers must collapse to nothing.
 	const spa = [];
