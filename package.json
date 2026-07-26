@@ -263,6 +263,12 @@
           "properties": {}
         }
       }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "integratedBrowserMcp",
+        "label": "Integrated Browser"
+      }
     ]
   },
   "scripts": {

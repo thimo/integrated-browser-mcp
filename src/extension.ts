@@ -92,6 +92,12 @@ export function activate(context: vscode.ExtensionContext) {
 	// reports cleanly when the bridge is stopped.
 	registerLanguageModelTools(context, () => cdp, log);
 
+	// Offer the bundled MCP server to VS Code-hosted MCP clients. Registered at
+	// activation per the API contract (contributes.mcpServerDefinitionProviders +
+	// this call), and once for the extension lifetime so stop/start can't
+	// double-register the same id.
+	registerMcpProvider(context);
+
 	const config = vscode.workspace.getConfiguration('browserBridge');
 	if (config.get<boolean>('autoStart', true)) {
 		startBridge(context);
@@ -247,10 +253,8 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		// 5. Register this instance for MCP discovery
 		await registerInstance(actualEndpoint);
 
-		// 6. Configure Claude (server already synced above), and offer the same
-		//    server to VS Code-hosted MCP clients through the official API so
-		//    they do not depend on us editing another tool's config file.
-		registerMcpProvider();
+		// 6. Configure Claude (server already synced above). The VS Code MCP
+		//    provider is registered once at activation, not here.
 		await configureClaude();
 
 		log.appendLine(`[Bridge] Started successfully on ${actualEndpoint.socketPath ?? `port ${actualEndpoint.port}`}`);
@@ -433,14 +437,13 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
  * Feature-detected: the API is stable in 1.101+ but this extension supports
  * older builds.
  */
-function registerMcpProvider(): void {
+function registerMcpProvider(context: vscode.ExtensionContext): void {
 	const lm = vscode.lm as unknown as { registerMcpServerDefinitionProvider?: unknown };
 	if (typeof lm.registerMcpServerDefinitionProvider !== 'function') return;
 	try {
-		// Per-start (not context.subscriptions): a second registration under the
-		// same id on stop->start throws "already registered", and the provider
-		// should not outlive the bridge it points at.
-		startDisposables.push(
+		// Requires the matching contributes.mcpServerDefinitionProviders entry in
+		// package.json (id 'integratedBrowserMcp'); without it this call throws.
+		context.subscriptions.push(
 			vscode.lm.registerMcpServerDefinitionProvider('integratedBrowserMcp', {
 				provideMcpServerDefinitions: () => [
 					new vscode.McpStdioServerDefinition('Integrated Browser', 'node', [STABLE_SERVER]),
