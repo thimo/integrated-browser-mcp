@@ -6,7 +6,11 @@ export { CDPState, ConsoleEntry, NetworkEntry, DownloadEntry };
 
 export interface TabInfo {
 	tabId: string;
-	/** 1-indexed display number matching the `①②③…` prefix in the tab title. Over 20 → null (tab shows `🤯`). */
+	/**
+	 * 1-indexed number shown in the tab title for tabs the bridge opened.
+	 * `null` for tabs the user opened — those are never marked, so a number
+	 * would refer to something invisible. Freed and reused when a tab closes.
+	 */
 	number: number | null;
 	url: string;
 	title: string;
@@ -64,7 +68,13 @@ function tabIndicatorMode(): TabIndicatorMode {
 }
 
 function tabIndicatorText(): string {
-	return vscode.workspace.getConfiguration('browserBridge').get<string>('tabIndicatorText', '● ');
+	const raw = vscode.workspace.getConfiguration('browserBridge').get<string>('tabIndicatorText', '●');
+	// The setting offers bare symbols so the dropdown reads cleanly (a trailing
+	// space would be invisible there), but the prefix needs one to separate it
+	// from the title. Normalising also keeps older settings that already
+	// included the space working.
+	const token = raw.trim();
+	return token ? `${token} ` : '● ';
 }
 
 /**
@@ -146,12 +156,18 @@ export class CDPManager {
 	private async claimOwnership(tab: CDPTab): Promise<CDPTab> {
 		if (tab.bridgeOwned) return tab;
 		tab.bridgeOwned = true;
+		// Adopted before ownership was known, so it has no number yet.
+		if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
 		const prefix = this.indicatorPrefixFor(tab);
 		if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
 		return tab;
 	}
 
-	/** Pick the lowest unused display number so new tabs reclaim gaps left by closed tabs. */
+	/**
+	 * Lowest unused number, so closing a tab frees its slot for the next one:
+	 * with 1 and 2 open, closing 1 means the next tab is 1 again rather than 3.
+	 * Only bridge-owned tabs hold a number, so the sequence has no invisible gaps.
+	 */
 	private allocateNumber(): number {
 		const used = new Set<number>();
 		for (const tab of this.tabs.values()) {
@@ -292,7 +308,11 @@ export class CDPManager {
 		const promise = (async () => {
 			const tab = new CDPTab(generateTabId(), this.log);
 			tab.bridgeOwned = bridgeOwned;
-			tab.displayNumber = this.allocateNumber();
+			// Only the bridge's own tabs are numbered. Numbering everything
+			// meant the user's tabs silently consumed 1 and 2 while showing no
+			// prefix, so the agent's first tab appeared as "(3)" — a number the
+			// user cannot see the origin of, with no visible 1 or 2 to match.
+			tab.displayNumber = bridgeOwned ? this.allocateNumber() : null;
 			this.registerTab(tab);
 			await tab.connectToBrowserTab(browserTab);
 

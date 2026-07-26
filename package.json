@@ -108,8 +108,22 @@
         },
         "browserBridge.tabIndicatorText": {
           "type": "string",
-          "default": "● ",
-          "description": "The symbol used when browserBridge.tabIndicator is 'marker'. Include a trailing space if you want one."
+          "default": "●",
+          "enum": [
+            "●",
+            "◆",
+            "⚡",
+            "🤖",
+            "[AI]"
+          ],
+          "enumDescriptions": [
+            "Black circle — widest font coverage, renders essentially everywhere",
+            "Black diamond — geometric, also very widely supported",
+            "High voltage — colour emoji; needs an emoji font (absent on bare Linux)",
+            "Robot — colour emoji, unambiguously 'an agent'; same font caveat",
+            "Plain ASCII — cannot fail to render, at the cost of width"
+          ],
+          "description": "Symbol shown on tabs the agent controls when browserBridge.tabIndicator is 'marker'. A trailing space is added automatically. Emoji options render in colour on Windows and macOS but can appear as a placeholder box on systems without an emoji font."
         },
         "browserBridge.enforceSharing": {
           "type": "boolean",
@@ -248,7 +262,9 @@
     "test": "vscode-test",
     "publish:marketplace": "vsce publish --allow-proposed-apis browser",
     "release": "scripts/release.sh",
-    "test:unit": "node tests/unit.mjs"
+    "test:unit": "node tests/unit.mjs",
+    "pretest": "npm run package",
+    "test:integration": "vscode-test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

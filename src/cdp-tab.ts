@@ -532,6 +532,21 @@ export class CDPTab {
 	 * previous MutationObserver before installing a new one, and share the
 	 * document.title setter interception via a one-time flag.
 	 */
+	/**
+	 * Regex source matching any prefix we may have applied, so it can be
+	 * stripped before a new one goes on.
+	 *
+	 * The historical markers are fixed, but the current marker is
+	 * user-configurable — so switching from `● ` to `(1) ` has to remove a
+	 * token this code cannot know statically. Callers pass whatever is on the
+	 * title now; without it, changing modes leaves residue like `(1) ● Site`.
+	 */
+	private stripSource(extraToken?: string | null): string {
+		const token = (extraToken ?? '').trim();
+		const extra = token ? '|' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+		return `^(?:(?:\\(\\d+\\)|\\[\\d+\\]${extra}|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}\\u{25CF}]|\\u{1F92F}) )+`;
+	}
+
 	private buildTitleScript(prefix: string, ownerId: string | null): string {
 		const prefixJson = JSON.stringify(prefix);
 		const ownerJson = JSON.stringify(ownerId);
@@ -546,7 +561,8 @@ export class CDPTab {
 		// The `+` after the alternation group makes the strip greedy:
 		// `(1) ① ❷ Site` collapses to `Site` in one pass, preventing
 		// oscillation with rival scripts left behind by older versions.
-		const STRIP_RE = '/^(?:(?:\\(\\d+\\)|\\[\\d+\\]|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}]|\\u{1F92F}) )+/u';
+		const markerToken = prefix.replace(/\s+$/, '');
+		const STRIP_RE = `/${this.stripSource(markerToken)}/u`;
 		return `(function(){
 			var P = ${prefixJson};
 			var STRIP = ${STRIP_RE};
@@ -770,6 +786,10 @@ export class CDPTab {
 	 */
 	async setTitlePrefix(prefix: string, ownerId?: string): Promise<void> {
 		if (this.currentTitlePrefix === prefix) return;
+		// Remove the previous prefix first. The new script only knows how to
+		// strip its own marker, so switching e.g. marker -> number would
+		// otherwise leave the old one behind as `(1) ● Site`.
+		if (this.currentTitlePrefix) await this.removeTitlePrefix();
 		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
 		if (!hasTransport) return;
 		const script = this.buildTitleScript(prefix, ownerId ?? null);
@@ -815,12 +835,14 @@ export class CDPTab {
 					window.__bridgeTabPrefix = '';
 					var el = document.querySelector('title');
 					if (el) {
-						el.textContent = el.textContent.replace(/^(?:(?:\\(\\d+\\)|\\[\\d+\\]|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}]|\\u{1F92F}) )+/u, '');
+						el.textContent = el.textContent.replace(/${this.stripSource(this.currentTitlePrefix)}/u, '');
 					}
 				})();`,
 			}, { timeoutMs: 2000 });
 		} catch {
 			// Best-effort cleanup
+		} finally {
+			this.currentTitlePrefix = null;
 		}
 	}
 
