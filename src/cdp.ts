@@ -139,6 +139,18 @@ export class CDPManager {
 		}
 	}
 
+	/**
+	 * Record that the bridge owns this tab after the fact, applying the
+	 * indicator that the earlier (unowned) adoption skipped. Idempotent.
+	 */
+	private async claimOwnership(tab: CDPTab): Promise<CDPTab> {
+		if (tab.bridgeOwned) return tab;
+		tab.bridgeOwned = true;
+		const prefix = this.indicatorPrefixFor(tab);
+		if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
+		return tab;
+	}
+
 	/** Pick the lowest unused display number so new tabs reclaim gaps left by closed tabs. */
 	private allocateNumber(): number {
 		const used = new Set<number>();
@@ -266,10 +278,16 @@ export class CDPManager {
 		// An in-flight adoption takes priority: a concurrent caller must wait
 		// for the connect + title-prefix to finish, not grab the half-built
 		// tab reference from the map.
+		// Ownership has to be upgradeable, not just set at construction.
+		// `onDidOpenBrowserTab` fires for tabs we open ourselves and calls this
+		// without `bridgeOwned`, so whichever call arrives first decides — and
+		// the event usually wins. A tab the bridge opened would then be recorded
+		// as the user's: no indicator, and under `enforceSharing` it would be
+		// revoked as an unshared page the bridge had no business driving.
 		const pending = this.pendingAdoptions.get(browserTab);
-		if (pending) return pending;
+		if (pending) return bridgeOwned ? pending.then(tab => this.claimOwnership(tab)) : pending;
 		for (const tab of this.tabs.values()) {
-			if (tab.browserTab === browserTab) return tab;
+			if (tab.browserTab === browserTab) return bridgeOwned ? this.claimOwnership(tab) : tab;
 		}
 		const promise = (async () => {
 			const tab = new CDPTab(generateTabId(), this.log);
