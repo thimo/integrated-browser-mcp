@@ -89,8 +89,10 @@ const DOWNLOAD_BUFFER_SIZE = 50;
  * `BrowserTab.title` is not `document.title` — VS Code composes the editor
  * label as `"<document.title> (<origin>/)"`, so reporting it verbatim gave
  * callers `"Google (https://www.google.com/)"` for a page actually titled
- * `"Google"`. Only strips when the parenthesised part really is this page's
- * address, so a page legitimately titled `"Foo (https://bar)"` survives intact.
+ * `"Google"`. Only strips when the parenthesised part is exactly this page's
+ * composed origin, so a page legitimately titled `"Careers (https://x/jobs)"`
+ * (a real path) or `"Report (file:///b.html)"` survives intact — an origin-only
+ * match stripped those, and treated every opaque-origin URL as equal.
  */
 export function stripComposedLabel(label: string, url: string): string {
 	const match = label.match(/^(.+?)\s+\(([a-z][a-z0-9+.-]*:\/\/[^()]*|about:blank)\)$/i);
@@ -98,9 +100,12 @@ export function stripComposedLabel(label: string, url: string): string {
 	const [, title, suffix] = match;
 	if (!url) return label;
 	try {
-		if (new URL(suffix).origin === new URL(url).origin) return title;
+		const page = new URL(url);
+		// VS Code composes exactly "(origin/)". Strip only that — never a suffix
+		// carrying a real path/query/fragment.
+		if (suffix === page.origin + '/' || suffix === page.origin || suffix === url) return title;
 	} catch {
-		// Unparseable either side — keep the label rather than guess.
+		// Unparseable — keep the label rather than guess.
 	}
 	return label;
 }
@@ -266,13 +271,16 @@ export class CDPTab {
 			return;
 		}
 
-		// Websocket/debug-session path has no such event; fall back to a
-		// bounded poll and read `document.title` ourselves.
+		// Websocket/debug-session path has no such event, and `title` there is
+		// only whatever refreshTitle last cached. Refresh *inside* the loop so
+		// metadataSettled tests fresh values: otherwise a fresh tab (empty cached
+		// title) never settles and burns the full timeout, and a re-navigated tab
+		// settles immediately on the *previous* page's title.
 		while (Date.now() < deadline) {
+			await this.refreshTitle();
 			if (this.metadataSettled()) break;
 			await new Promise(resolve => setTimeout(resolve, 50));
 		}
-		await this.refreshTitle();
 	}
 
 	/** Both url and title look like real page values rather than placeholders. */
@@ -542,9 +550,17 @@ export class CDPTab {
 	 * title now; without it, changing modes leaves residue like `(1) ● Site`.
 	 */
 	private stripSource(extraToken?: string | null): string {
-		const token = (extraToken ?? '').trim();
-		const extra = token ? '|' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
-		return `^(?:(?:\\(\\d+\\)|\\[\\d+\\]${extra}|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}\\u{25CF}]|\\u{1F92F}) )+`;
+		// Strip control chars first (a newline in the token would break the regex
+		// literal this is spliced into), then escape regex metacharacters —
+		// including `/`, since the source is embedded in a `/.../u` literal.
+		const token = (extraToken ?? '').trim().replace(/[\u0000-\u001f]/g, '');
+		const extra = token ? '|' + token.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') : '';
+		// U+25CF (●) is deliberately NOT in this static set: it is the default
+		// `tabIndicatorText` marker, handled dynamically via `extra`, and pages
+		// legitimately titled "● …" (live/recording indicators) must keep it when
+		// it is not the active marker. U+25C9 (◉) stays — a real historical bridge
+		// marker (0.3.0), never page content.
+		return `^(?:(?:\\(\\d+\\)|\\[\\d+\\]${extra}|[\\u{2460}-\\u{2473}\\u{2776}-\\u{277F}\\u{24EB}-\\u{24F4}\\u{25C9}]|\\u{1F92F}) )+`;
 	}
 
 	private buildTitleScript(prefix: string, ownerId: string | null): string {
@@ -786,12 +802,15 @@ export class CDPTab {
 	 */
 	async setTitlePrefix(prefix: string, ownerId?: string): Promise<void> {
 		if (this.currentTitlePrefix === prefix) return;
+		// Check transport before removing: removeTitlePrefix nulls currentTitlePrefix
+		// even when it can't reach the page, which would desync the bridge (thinks
+		// no prefix) from the page (still shows the old one).
+		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
+		if (!hasTransport) return;
 		// Remove the previous prefix first. The new script only knows how to
 		// strip its own marker, so switching e.g. marker -> number would
 		// otherwise leave the old one behind as `(1) ● Site`.
 		if (this.currentTitlePrefix) await this.removeTitlePrefix();
-		const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
-		if (!hasTransport) return;
 		const script = this.buildTitleScript(prefix, ownerId ?? null);
 		try {
 			// Remove prior on-new-document script (if any) before adding the new one.
@@ -819,6 +838,10 @@ export class CDPTab {
 
 	/** Remove any injected title prefix and restore the page's own title. */
 	async removeTitlePrefix(): Promise<void> {
+		// Nothing was ever installed on this tab (e.g. an adopted user page in a
+		// bridge-owned-only setup): do not inject a strip script into a page we
+		// never marked. Guards revoke/disconnect/refreshIndicators at once.
+		if (!this.titleScriptId && !this.currentTitlePrefix) return;
 		try {
 			const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
 			if (!hasTransport) return;
@@ -828,11 +851,17 @@ export class CDPTab {
 				}).catch(() => {});
 				this.titleScriptId = null;
 			}
-			// Best-effort: disconnect observer + strip any of our prefix markers.
+			// Best-effort: disconnect observer, strip our prefix, and uninstall the
+			// document.title setter interception. Deleting the own-property accessor
+			// exposes the native Document.prototype title again; leaving it in place
+			// kept mangling titles the page set (with a stale STRIP after a marker
+			// switch) for the life of the document.
 			await this.send('Runtime.evaluate', {
 				expression: `(function(){
 					try { if (window.__bridgeTitleObserver) window.__bridgeTitleObserver.disconnect(); } catch (_) {}
 					window.__bridgeTabPrefix = '';
+					try { delete document.title; } catch (_) {}
+					window.__bridgeTitleIntercepted = false;
 					var el = document.querySelector('title');
 					if (el) {
 						el.textContent = el.textContent.replace(/${this.stripSource(this.currentTitlePrefix)}/u, '');

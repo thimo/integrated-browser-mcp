@@ -153,13 +153,20 @@ export class CDPManager {
 	 * Record that the bridge owns this tab after the fact, applying the
 	 * indicator that the earlier (unowned) adoption skipped. Idempotent.
 	 */
-	private async claimOwnership(tab: CDPTab): Promise<CDPTab> {
-		if (tab.bridgeOwned) return tab;
-		tab.bridgeOwned = true;
-		// Adopted before ownership was known, so it has no number yet.
-		if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
-		const prefix = this.indicatorPrefixFor(tab);
-		if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
+	private async claimOwnership(tab: CDPTab, makeActive = false): Promise<CDPTab> {
+		// Apply makeActive even if ownership was already set: when the open event
+		// wins the race, openTab's makeActive intent reaches only here, and
+		// without this the newly opened (visually focused) tab is not the active
+		// one, so later tabId-less calls drive the wrong page.
+		if (makeActive) this._activeTabId = tab.tabId;
+		if (!tab.bridgeOwned) {
+			tab.bridgeOwned = true;
+			// Adopted before ownership was known, so it has no number yet.
+			if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
+			const prefix = this.indicatorPrefixFor(tab);
+			if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
+		}
+		if (makeActive) this.emitStateChange();
 		return tab;
 	}
 
@@ -301,9 +308,9 @@ export class CDPManager {
 		// as the user's: no indicator, and under `enforceSharing` it would be
 		// revoked as an unshared page the bridge had no business driving.
 		const pending = this.pendingAdoptions.get(browserTab);
-		if (pending) return bridgeOwned ? pending.then(tab => this.claimOwnership(tab)) : pending;
+		if (pending) return bridgeOwned ? pending.then(tab => this.claimOwnership(tab, makeActive)) : pending;
 		for (const tab of this.tabs.values()) {
-			if (tab.browserTab === browserTab) return bridgeOwned ? this.claimOwnership(tab) : tab;
+			if (tab.browserTab === browserTab) return bridgeOwned ? this.claimOwnership(tab, makeActive) : tab;
 		}
 		const promise = (async () => {
 			const tab = new CDPTab(generateTabId(), this.log);

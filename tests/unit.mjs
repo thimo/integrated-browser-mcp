@@ -80,6 +80,10 @@ const section = name => console.log(`\n${name}`);
 	eq('passes through an unsuffixed title', strip('Plain Title', 'https://x.com/'), 'Plain Title');
 	eq('needs a url to compare against', strip('Google (https://www.google.com/)', ''), 'Google (https://www.google.com/)');
 	eq('handles about:blank', strip('Untitled (about:blank)', 'about:blank'), 'Untitled');
+	// Regressions the origin-only compare got wrong: a same-origin real path,
+	// and two distinct opaque-origin (file:) urls that both compared as "null".
+	eq('keeps a same-origin url with a real path', strip('Careers (https://x.com/jobs)', 'https://x.com/home'), 'Careers (https://x.com/jobs)');
+	eq('keeps a foreign file url on a file page', strip('Report (file:///b.html)', 'file:///a.html'), 'Report (file:///b.html)');
 }
 
 // ---------------------------------------------------------------- lm-pages
