@@ -1,4 +1,5 @@
 import * as http from 'http';
+import * as net from 'net';
 import * as fs from 'fs';
 import express from 'express';
 import type { CDPManager } from './cdp';
@@ -130,6 +131,8 @@ export class BridgeServer {
 	private log: vscode.OutputChannel;
 	private ensureBrowser: ((url?: string) => Promise<void>) | null = null;
 	private emulatePath: 'emulation' | 'page' | 'unknown' = 'unknown';
+	/** Set when listening on a unix socket / named pipe instead of a TCP port. */
+	private socketPath: string | null = null;
 
 	constructor(cdp: CDPManager, log: vscode.OutputChannel) {
 		this.cdp = cdp;
@@ -1083,6 +1086,56 @@ export class BridgeServer {
 	get port(): number | null {
 		const addr = this.server?.address();
 		return addr && typeof addr === 'object' ? addr.port : null;
+	}
+
+	/**
+	 * Listen on a unix socket (POSIX) or named pipe (Windows) instead of a TCP
+	 * port. Nothing is bound to a network interface, so there is no port to
+	 * scan and no chance of colliding with another service; access control
+	 * becomes filesystem permissions (0600) rather than "we bound to loopback".
+	 *
+	 * Viable because the MCP server and the extension host must already share a
+	 * filesystem — instance discovery is a file under `~`. Where that holds
+	 * (VS Code local, WSL remote, dev containers) the pipe works; where it does
+	 * not, discovery never worked either and the caller falls back to TCP.
+	 */
+	async startOnSocket(socketPath: string): Promise<string> {
+		// A crashed extension host leaves the socket file behind, and bind()
+		// fails on an existing path. Only remove it if nothing is listening.
+		if (process.platform !== 'win32' && fs.existsSync(socketPath)) {
+			const live = await this.probeSocket(socketPath);
+			if (live) throw new Error(`Socket already in use: ${socketPath}`);
+			try { fs.unlinkSync(socketPath); } catch { /* raced with another cleanup */ }
+		}
+		await new Promise<void>((resolve, reject) => {
+			const server = this.app.listen(socketPath);
+			server.once('listening', () => {
+				this.server = server;
+				resolve();
+			});
+			server.once('error', err => { server.close(); reject(err); });
+		});
+		// Defence in depth: the owner-only parent directory is what actually
+		// prevents another local user reaching this, since there is an
+		// unavoidable window between bind and chmod. Named pipes are not
+		// filesystem objects and have no mode to set.
+		if (process.platform !== 'win32') {
+			try { fs.chmodSync(socketPath, 0o600); } catch { /* best effort */ }
+		}
+		this.socketPath = socketPath;
+		this.log.appendLine(`[HTTP] Server listening on ${socketPath} (no TCP port)`);
+		return socketPath;
+	}
+
+	/** True when something is actively accepting on this socket path. */
+	private probeSocket(socketPath: string): Promise<boolean> {
+		return new Promise(resolve => {
+			const socket = net.connect(socketPath);
+			const timer = setTimeout(() => done(false), 500);
+			const done = (live: boolean) => { clearTimeout(timer); socket.destroy(); resolve(live); };
+			socket.once('connect', () => done(true));
+			socket.once('error', () => done(false));
+		});
 	}
 
 	async start(preferredPort: number, maxRetries = 20): Promise<number> {

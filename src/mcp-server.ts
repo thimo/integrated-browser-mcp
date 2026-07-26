@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
 import * as os from 'os';
 
 // Replaced at build time by esbuild's `define` (see esbuild.js). Keeps
@@ -12,7 +13,10 @@ declare const __PKG_VERSION__: string;
 const INSTANCES_DIR = path.join(os.homedir(), '.integrated-browser-mcp', 'instances');
 
 interface Instance {
-	port: number;
+	/** Present when the bridge listens on TCP. */
+	port?: number;
+	/** Present when the bridge listens on a unix socket / named pipe (preferred). */
+	socketPath?: string;
 	workspace: string;
 	pid: number;
 	startedAt: string;
@@ -65,32 +69,84 @@ function discoverInstance(): Instance | null {
 	return null;
 }
 
-function discoverPort(): number | null {
-	return discoverInstance()?.port ?? null;
+/**
+ * Resolve how to reach the bridge. A unix socket / named pipe is preferred
+ * (no listening port at all); TCP remains for instances that could not create
+ * one, and for the explicit BROWSER_BRIDGE_PORT override.
+ *
+ * Re-resolved on every call. Caching was unsafe: VS Code windows shift ports
+ * and socket paths on reload, so a cached endpoint can silently route calls to
+ * the wrong workspace's bridge. Reading the instances dir costs ~1ms.
+ */
+function resolveEndpoints(): Array<{ socketPath?: string; port?: number }> {
+	// Env override takes priority (manual config / cross-boundary setups where
+	// the MCP server and extension host do not share a filesystem).
+	if (process.env.BROWSER_BRIDGE_PORT) {
+		return [{ port: Number(process.env.BROWSER_BRIDGE_PORT) }];
+	}
+	if (process.env.BROWSER_BRIDGE_SOCKET) {
+		return [{ socketPath: process.env.BROWSER_BRIDGE_SOCKET }];
+	}
+	const inst = discoverInstance();
+	if (inst) {
+		// A discovered instance is authoritative: try exactly what it published
+		// and let a failure surface. Appending the default port here would let a
+		// transient socket error silently reroute to whatever listens on 3788,
+		// which in a multi-window setup is a *different workspace's* bridge.
+		// Driving the wrong window without knowing is worse than failing.
+		const candidates: Array<{ socketPath?: string; port?: number }> = [];
+		if (inst.socketPath) candidates.push({ socketPath: inst.socketPath });
+		if (inst.port) candidates.push({ port: inst.port });
+		if (candidates.length) return candidates;
+	}
+	// Nothing discovered: fall back to the lowest port the extension binds, which
+	// also covers the version-skew case where an older extension is on TCP and
+	// never wrote a socket path.
+	return [{ port: 3788 }];
 }
 
-function getBridgeUrl(): string {
-	// Env var override takes priority (for testing / manual config).
-	if (process.env.BROWSER_BRIDGE_PORT) {
-		return `http://127.0.0.1:${process.env.BROWSER_BRIDGE_PORT}`;
+/**
+ * Node's `fetch` cannot address a unix socket without a custom undici
+ * dispatcher, so go through `http.request`, which speaks both transports with
+ * the same call shape.
+ */
+function requestOne(endpoint: { socketPath?: string; port?: number }, urlPath: string, method: string, body?: string): Promise<string> {
+	const options: http.RequestOptions = endpoint.socketPath
+		? { socketPath: endpoint.socketPath, path: urlPath, method }
+		: { host: '127.0.0.1', port: endpoint.port, path: urlPath, method };
+	if (body) {
+		options.headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) };
 	}
-	// Re-discover on every call. Caching was unsafe: VS Code windows shift
-	// ports on reload, so a cached port can silently route calls to the wrong
-	// workspace's bridge. Reading the instances dir costs ~1ms.
-	const port = discoverPort();
-	if (port) return `http://127.0.0.1:${port}`;
-	// Last resort default — the lowest port the extension tries to bind.
-	return 'http://127.0.0.1:3788';
+	return new Promise((resolve, reject) => {
+		const req = http.request(options, res => {
+			let data = '';
+			res.setEncoding('utf-8');
+			res.on('data', chunk => data += chunk);
+			res.on('end', () => resolve(data));
+		});
+		req.on('error', reject);
+		if (body) req.write(body);
+		req.end();
+	});
+}
+
+/** Try each candidate endpoint in order; report the first success. */
+async function httpRequest(urlPath: string, method: string, body?: string): Promise<string> {
+	let lastError: unknown;
+	for (const endpoint of resolveEndpoints()) {
+		try {
+			return await requestOne(endpoint, urlPath, method, body);
+		} catch (err) {
+			lastError = err;
+		}
+	}
+	throw lastError ?? new Error('No reachable bridge endpoint');
 }
 
 async function bridgeFetch(urlPath: string, init?: { method?: string; body?: string }): Promise<{ ok: boolean; data?: unknown; error?: string }> {
 	try {
-		const base = getBridgeUrl();
-		const res = await fetch(`${base}${urlPath}`, {
-			method: init?.method ?? 'GET',
-			...(init?.body ? { headers: { 'Content-Type': 'application/json' }, body: init.body } : {}),
-		});
-		return await res.json() as { ok: boolean; data?: unknown; error?: string };
+		const text = await httpRequest(urlPath, init?.method ?? 'GET', init?.body);
+		return JSON.parse(text) as { ok: boolean; data?: unknown; error?: string };
 	} catch {
 		return { ok: false, error: 'Integrated Browser MCP is not reachable. Make sure VS Code is running with the extension active.' };
 	}

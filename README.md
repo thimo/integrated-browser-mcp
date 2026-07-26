@@ -210,6 +210,17 @@ Orthogonal to the above, `browserBridge.enforceSharing` decides who the bridge m
 | `true` | available (A / C) | `enforcing` | Bridge-opened tabs + shared pages. Unsharing detaches within ~2s; later calls on that `tabId` fail. |
 | `true` | absent (B / D) | `bridge-owned-only` | Only tabs the bridge opened. Yours stay off-limits and cannot be granted — there is no share button to press. |
 
+### Transport
+
+Independent of everything above. The bridge prefers a unix socket (or Windows named pipe) so no TCP port is opened at all; see `browserBridge.transport`.
+
+| Setup | Socket / pipe | Notes |
+|---|:--:|---|
+| VS Code local (Windows/macOS/Linux) | ✅ | named pipe on Windows |
+| WSL remote | ✅ | extension host and client both inside WSL |
+| Dev Container | ✅ | both inside the container — simpler than TCP, no port forwarding |
+| Client and extension host on **different** filesystems | ❌ | set `browserBridge.transport` to `tcp` and `BROWSER_BRIDGE_PORT`; instance discovery does not span that boundary either |
+
 ## Marking agent-controlled tabs
 
 `browserBridge.tabIndicator` controls how a tab under agent control is marked:
