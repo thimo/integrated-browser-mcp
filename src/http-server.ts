@@ -482,6 +482,8 @@ export class BridgeServer {
 				// Settle the title before answering: on the websocket path nothing
 				// else populates it, so a caller reading straight from the response
 				// (or a follow-up /tabs) would report a real page as untitled.
+				// refreshTitle swallows its own errors (returns the cached title), so
+				// a mid-navigation read can't turn a successful navigation into ok:false.
 				const title = await resolved.tab.refreshTitle();
 				res.json({ ok: true, data: { ...(result as object), tabId: resolved.tab.tabId, url: resolved.tab.url, title } });
 			} catch (err) {
