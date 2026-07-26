@@ -5,19 +5,28 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
+
+Most of this release was contributed by [@RyanEwen](https://github.com/RyanEwen) (#6, #8) — page discovery, sharing enforcement, the socket transport, and a series of fixes from live testing. Thanks!
+
+### Breaking changes
+- **The bridge now listens on a unix socket (named pipe on Windows) instead of a TCP port.** Access control becomes filesystem permissions (owner-only socket in a `0700` directory under `~/.integrated-browser-mcp/sockets/`) rather than "we bound to loopback": nothing is network-bound, there is no port to scan, and no unauthenticated `/eval` endpoint reachable by every local process. The bundled MCP server discovers the socket automatically, so **Claude Code and other MCP clients are unaffected**. Direct HTTP callers change from `curl http://127.0.0.1:3788/status` to `curl --unix-socket ~/.integrated-browser-mcp/sockets/<id>.sock http://localhost/status` (the exact path is in the instance file). Set `browserBridge.transport` to `"tcp"` to restore the old behavior wholesale; `"auto"` (default) falls back to TCP where a socket cannot be created.
+- **`browser_snapshot` returns a compact, pruned projection instead of the raw AX tree.** A single ordinary SPA page previously produced ~291k characters, blowing the model's token ceiling. Ignored nodes, unnamed non-actionable wrappers, and duplicate `InlineTextBox`/`LineBreak` nodes are dropped; each node is flattened to `{ nodeId, role, name, value?, … }` — ~98% smaller on a representative tree. New params: `selector`, `interactiveOnly`, `limit` (default 1500), `includeIgnored`, and `full: true` to get the old raw dump back.
 
 ### Added
-- `browser_pages_discover` MCP tool and `GET /pages` endpoint: report integrated browser pages VS Code knows about, including ones the bridge is not attached to (opened by the user, or owned by another window). Backed by VS Code's built-in `list_browser_pages` language model tool via `vscode.lm.invokeTool` ([microsoft/vscode#326976](https://github.com/microsoft/vscode/pull/326976), VS Code 1.131+). Entries expose VS Code's `pageId` plus an `attachedTabId` when the bridge already drives that URL.
-- `browserBridge.lmPageDiscovery` setting (default `true`) to disable the integration.
-- `/status` now reports `lmPageDiscovery: { enabled, available }`.
+- `browser_pixel` MCP tool and `POST /pixel` endpoint: sample on-screen colours at a point or an element's centre, returned as `{ hex, r, g, b, a }`. Sampled from the composited screenshot, so it works on WebGL canvases where in-page readback silently returns black (cleared drawing buffer) — a trap, not an error, since the in-page call succeeds with plausible-looking data.
+- `browser_pages_discover` MCP tool and `GET /pages` endpoint: report integrated browser pages VS Code knows about, including ones the bridge is not attached to (opened by the user, or owned by another window). Backed by VS Code's built-in `list_browser_pages` language model tool via `vscode.lm.invokeTool` ([microsoft/vscode#326976](https://github.com/microsoft/vscode/pull/326976), VS Code 1.131+). Entries expose VS Code's `pageId` plus an `attachedTabId` when the bridge already drives that URL. Gated behind `browserBridge.lmPageDiscovery`, **off by default** until the 1.131 path has been verified first-hand; `/status` reports `lmPageDiscovery: { enabled, available }`.
+- The buffered console, network, and download logs — the capabilities VS Code's own browser toolset lacks — are contributed as VS Code language model tools (`integratedBrowser_console` / `_network` / `_downloads` / `_tabs`), so Copilot can use them alongside its native browser tools. Feature-detected and non-fatal on older builds.
+- The bundled MCP server is also offered to VS Code-hosted MCP clients via `lm.registerMcpServerDefinitionProvider`, instead of relying solely on writing `~/.claude.json`.
+- `browserBridge.transport` setting: `auto` (socket, TCP fallback) / `socket` (fail rather than open a port) / `tcp`.
+- `browser_tab_open` accepts `beside: true` to open in a split editor group; `browser_tab_list` entries carry the tab's favicon as `icon`.
 
 ### Changed
-- **`browser_snapshot` now returns a compact, pruned projection instead of the raw AX tree.** A single ordinary SPA list page previously produced ~291k characters / 15k lines, blowing the model's token ceiling and forcing a spill-to-file round trip. Ignored nodes, unnamed non-actionable nodes (the sea of `generic` wrappers component frameworks emit), and duplicate `InlineTextBox`/`LineBreak` nodes are dropped, and each node is flattened from CDP's `{value:{type,value}}` wrappers to `{ nodeId, role, name, value?, … }`. On a representative tree this is ~98% smaller. New params: `selector` (scope to a subtree), `interactiveOnly` (actionable roles only), `limit` (default 1500, response reports `truncated`/`totalMatched`), `includeIgnored`, and `full` to restore the old raw dump.
-- **Tab marking is now scoped to tabs the bridge opened, and configurable via `browserBridge.tabIndicator`** (`number` (default) / `marker` / `off`). Previously the `(N) ` prefix was applied on adoption — and since the bridge attaches to *every* integrated browser tab in the window, that stamped a prefix onto pages the user had opened themselves. Their page, their title, modified because an unrelated tool was running. Marking still works by rewriting the page's real `document.title` through an injected script (the only lever an extension has over the editor tab label), so it remains observable by the page; `off` opts out entirely, and `marker` shows agent control via a fixed symbol (`browserBridge.tabIndicatorText`) without implying an ordering that renumbers as tabs come and go. Changing the setting now takes effect immediately, and switching to `off` restores the original titles instead of leaving them modified.
+- **Tab marking is now scoped to tabs the bridge opened, and configurable via `browserBridge.tabIndicator`** (`number` (default) / `marker` / `off`). Previously the `(N) ` prefix was applied on adoption — and since the bridge attaches to *every* integrated browser tab in the window, that stamped a prefix onto pages the user had opened themselves. Pages you open are now never touched, and only bridge-opened tabs consume a number (so the agent's first tab is `(1)` even with your own tabs open). `marker` shows a fixed symbol (`browserBridge.tabIndicatorText`) without implying an ordering; setting changes apply immediately, and switching to `off` restores the original titles.
+- `/navigate` now returns `{ tabId, url, title }` alongside the CDP result.
 
 ### Security
-- **Unsharing a page did not revoke bridge access, and nothing said so.** Discovery honoured the unshare (`pages: []`) while `browser_tab_list` still returned the page as `connected` and `browser_eval` against its `tabId` kept working — and the list handed the live `tabId` back on demand, so an agent didn't even need to have stored it. Root cause: the bridge's access never came from VS Code's sharing model. It attaches over CDP to every `BrowserTab` in the window, and the proposed `browser` API exposes no sharing state at all (`BrowserTab` is only `url`/`title`/`icon`/`startCDPSession()`/`close()`), so share/unshare is structurally invisible to it. Two changes: `/status` now reports `sharing: { enforced, mode, note }` stating plainly that unsharing does not detach and naming the real revocation paths; and the new opt-in `browserBridge.enforceSharing` makes sharing the access model — the bridge then drives only tabs it opened itself plus pages VS Code reports as shared, detaching within ~2s of an unshare and failing later calls on that `tabId` with an explicit reason rather than succeeding. Enforcement depends on the `list_browser_pages` listing (VS Code 1.131+ *and* chat enabled), matches by URL, and where sharing cannot be expressed at all (chat disabled) restricts the bridge to tabs it opened rather than granting access to everything — `/status` distinguishes `enforcing` from `bridge-owned-only` so it never claims a guarantee it isn't providing.
+- **Unsharing a page did not revoke bridge access, and nothing said so.** The bridge's access never came from VS Code's sharing model: it attaches over CDP to every `BrowserTab` in the window, and the proposed `browser` API exposes no sharing state at all, so share/unshare is structurally invisible to it. Two changes: `/status` now reports `sharing: { enforced, mode, note }` stating plainly that unsharing does not detach and naming the real revocation paths; and the new opt-in `browserBridge.enforceSharing` makes sharing the access model — the bridge then drives only tabs it opened itself plus pages VS Code reports as shared, detaching within ~2s of an unshare and failing later calls on that `tabId` with an explicit reason. Enforcement needs the sharing signal (VS Code 1.131+, chat enabled, and `browserBridge.lmPageDiscovery` on) and matches by URL; without a signal it restricts the bridge to tabs it opened itself rather than failing open — `/status` distinguishes `enforcing` from `bridge-owned-only` so it never claims a guarantee it isn't providing.
 
 ### Fixed
 - **`makeActive: false` no longer steals focus.** `openBrowserTab` was called with only `preserveFocus`, which holds keyboard focus but still makes the new tab the visible editor — so an agent following the "open your own tab, don't disturb the user" practice flipped the user's screen anyway. Now also passes `background: !makeActive`.
@@ -30,32 +39,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tab titles are no longer empty on the websocket/debug-session path. `_lastKnownTitle` was declared but never assigned, so `title` reported `''` indefinitely (not a race) and callers described real pages as untitled. Added `CDPTab.refreshTitle()`, called after `/navigate` (which now also returns `tabId`/`url`/`title`) and to backfill empty titles in `/tabs`.
 - `browser_pages_discover` no longer leaks VS Code's chat-only guidance — its `raw` output advertised an `open_browser_page` tool that this bridge does not expose, and models acted on it because it reads as authoritative inside a tool result. Lines naming unavailable tools are stripped, and a new `hint` field explains how to act on a discovered page using tools that actually exist.
 
-Feature-detected at runtime, so `engines.vscode` stays at `^1.112.0` and older builds are unaffected — discovery simply returns `{ available: false, reason, requires }`.
+Everything new is feature-detected at runtime, so `engines.vscode` stays at `^1.112.0` and older builds are unaffected. Discovery is deliberately discovery-only; the CDP path still backs every action. Context: [#5](https://github.com/thimo/vscode-integrated-browser-mcp/issues/5).
 
-This is discovery-only; the CDP path still backs every action. VS Code's browser tools have no equivalent for buffered console/network, downloads, or emulation, and `run_playwright_code` is one-shot so it cannot hold event listeners. Context: [thimo/vscode-integrated-browser-mcp#5](https://github.com/thimo/vscode-integrated-browser-mcp/issues/5).
-
-## [0.6.1] - 2026-07-26
+## [0.6.1] — 2026-07-26
 
 ### Fixed
 - Bridge no longer crashes at startup on VS Code builds where the `browser` API proposal is declared but not granted (e.g. 1.130 stable, which strips non-allowlisted `enabledApiProposals` from Marketplace installs). Newer VS Code exposes the ungranted members as stubs that throw on access, so the old `typeof vscode.window.openBrowserTab` feature-detection false-positived and the startup event wiring then threw `CANNOT use API proposal: browser`, taking the whole bridge down (#7). Detection now probes an actual property access and treats any throw as "not available", and the startup wiring additionally downgrades to the debug-session fallback path on failure instead of failing to start.
 
 
-## [0.6.0] - 2026-07-09
+## [0.6.0] — 2026-07-09
 
 ### Added
 - `browser_type` now accepts `submit: true` to press Enter after typing — form fill + submit in one tool call instead of a `browser_type` + `browser_eval` round-trip. Mirrors the `submit` parameter Copilot's `typeInPage` tool gained in VS Code 1.124. Implemented as `Input.dispatchKeyEvent` keyDown (with `text: '\r'`, so form submission actually fires) + keyUp after the existing `Input.insertText`; response now reports `{ typed, submitted }`.
 
-## [0.5.3] - 2026-05-20
+## [0.5.3] — 2026-05-20
 
 ### Changed
 - Icon viewBox tightened to remove the ~10% transparent margin around the rounded square. The Marketplace doesn't mask icons into a safe-area, so the padding just made the artwork render smaller than its neighbors in the listing grid.
 
-## [0.5.2] - 2026-05-20
+## [0.5.2] — 2026-05-20
 
 ### Changed
 - Icon re-rendered at 1024×1024 (was 128×128) so the Marketplace listing and zoomed views stay sharp on retina displays. PNG source is `media/icon.svg`.
 
-## [0.5.1] - 2026-04-27
+## [0.5.1] — 2026-04-27
 
 ### Added
 - New `browser_download_set` and `browser_downloads` tools for headless downloads. By default the integrated browser shows a native save dialog when a page initiates a download — fine for a human, fatal for an agent. `browser_download_set` configures Chromium to save to a directory instead (default `<workspace>/tmp/downloads`, workspace-scoped exactly like `browser_markdown`'s `outputPath`); `browser_downloads` exposes a 50-entry circular buffer of `downloadWillBegin` / `downloadProgress` events so the agent learns the suggested filename and can poll for `state:"completed"`. Behavior is opt-in — no VS Code setting, no auto-call on activation — so humans using the integrated browser keep the normal save dialog until the agent flips the switch. Supports all four CDP behaviors (`allow`, `allowAndName`, `deny`, `default`); `default` restores the dialog when done.
@@ -64,7 +71,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
     2. **`Page.downloadWillBegin` / `Page.downloadProgress`, not `Browser.*`.** Same story for events: only the `Page.*` variants fire on this transport. The handler listens to both and dedupes by GUID so future Chromium versions that emit both don't double-count.
     3. **`Browser.*` added to the `JsDebug.subscribe` allowlist** on the websocket-fallback transport too, so the best-effort `Browser.*` call's events would flow if the upstream proxy ever starts forwarding them.
 
-## [0.5.0] - 2026-04-27
+## [0.5.0] — 2026-04-27
 
 ### Added
 - `browser_screenshot` now accepts `fullPage: true` to capture the entire scrollable page (maps to CDP's `captureBeyondViewport`). The integrated browser pane is usually narrow, so viewport-only screenshots lose everything below the fold — full-page is what most agent workflows actually want.
@@ -74,7 +81,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 - New `browser_screenshot_slice` tool: captures one viewport-height slice of a long page plus metadata (`totalSlices`, `scrollHeight`, `viewportHeight`). Designed for AI consumers of tall pages where Chromium's single-PNG axis cap (~16,384 px) makes full-page capture fail, and where compressing 60k-px-tall content to a thumbnail loses the detail a vision model needs. Agents call once with no `slice` to learn the page shape, then request specific indices — `slice: 0` for the header, `slice: -1` for the footer (negative indices count from the end). Pairs naturally with `browser_emulate` (set the viewport, then slice through it).
 - New `browser_markdown` tool: extracts page content as markdown via a pure-JS DOM walker injected into the page (~80 lines, no Readability/Turndown, no deps). Optional `selector` param scopes extraction (defaults to `main`, falls back to `body`). Headings, links, code, pre-blocks, lists, blockquotes, and images are all preserved. Two non-obvious refinements forced by real-world docs sites (Apple Developer in particular): (1) link text is trimmed before bracketing so `<a> View </a>` becomes `[View](...)` rather than `[ View ](...)`; (2) adjacent inline siblings with no source-side whitespace get a synthetic separator so platform-availability runs like `<span>iOS 13.0+</span><span>iPadOS 13.0+</span>` don't render as `iOS 13.0+iPadOS 13.0+`. Optional `outputPath` (absolute or workspace-relative) writes the markdown to disk and returns only `Saved N bytes to <path>` — built for bulk archival where the body would otherwise flow through the agent's context. Paths are scoped to the open workspace folder; outside-workspace paths are rejected. Symlinks inside the workspace are not followed.
 
-## [0.4.1] - 2026-04-24
+## [0.4.1] — 2026-04-24
 
 ### Added
 - MCP server now sends a top-level `instructions` field on connect describing the integration (browser lives inside VS Code, numbered tabs, which tool is cheap vs expensive). Clients that honour the MCP spec's instructions field surface this to the model automatically.
@@ -86,7 +93,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
   - The new title script detects the pattern: if it sets the title more than 10 times within a second, it disconnects its own observer and backs off. The losing tab keeps whatever prefix the rival observer sets; the page stays responsive. Freshly-opened tabs (post-upgrade) are unaffected.
   - Also adds a per-process ownership marker (`window.__bridgeOwner`) used atomically at adopt time, as defence-in-depth for any future scenario where two 0.4.1+ instances could race on the same page. The marker is released on disconnect so a reloaded window cleanly reclaims its tabs.
 
-## [0.4.0] - 2026-04-24
+## [0.4.0] — 2026-04-24
 
 ### Added
 - **Multi-tab support** (proposed-API path only — requires `--enable-proposed-api=thimo.integrated-browser-mcp`).
@@ -105,7 +112,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 ### Removed
 - `POST /tabs/:id/activate` legacy endpoint (used CDP target ids that weren't stable across restarts). Replaced by `POST /tab/activate/:tabId` with our tab ids.
 
-## [0.3.0] - 2026-04-23
+## [0.3.0] — 2026-04-23
 
 ### Added
 - Optional support for VS Code's proposed `browser` API ([microsoft/vscode#300319](https://github.com/microsoft/vscode/issues/300319)). When the extension is launched with `--enable-proposed-api=thimo.integrated-browser-mcp`, the bridge uses `vscode.window.openBrowserTab` + `BrowserTab.startCDPSession` instead of a debug session, bypassing `vscode-js-debug`'s CDP proxy. This makes web worker and service worker events (console + network) flow into `/console` and `/network`, tagged with `target: "worker"` / `"service_worker"`. No debug toolbar or Run & Debug badge in this mode.
@@ -120,7 +127,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 ### Fixed
 - Handshake-only CDP sessions (browser + primary page) are no longer reported as child sessions in `/status.children`, and their events no longer get a `target` field. Only true child sessions (workers, iframes) are tagged.
 
-## [0.2.0] - 2026-04-23
+## [0.2.0] — 2026-04-23
 
 ### Fixed
 - Console and network buffers were silently empty. vscode-js-debug's CDP proxy only forwards events the client has explicitly subscribed to; the bridge never subscribed. Now calls `JsDebug.subscribe` for `Runtime.*`, `Network.*`, `Target.*`, and `Page.*` on connect.
@@ -135,7 +142,7 @@ This is discovery-only; the CDP path still backs every action. VS Code's browser
 ### Changed
 - Minimum VS Code version bumped from 1.110 to 1.112, where [`editor-browser` became a first-class stable debug type](https://github.com/microsoft/vscode-js-debug/pull/2329) with supported `launch` + `attach`.
 
-## [0.1.0] - 2026-04-10
+## [0.1.0] — 2026-04-10
 
 Initial public release.
 
