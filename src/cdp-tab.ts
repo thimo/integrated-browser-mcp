@@ -83,6 +83,28 @@ const DOWNLOAD_BUFFER_SIZE = 50;
  *  - `connectToSession(debugSession)` — uses `requestCDPProxy` → WebSocket (the debug-session fallback path; works on any VS Code 1.112+)
  *  - `connectToBrowserTab(tab)` — uses the proposed `browser` API's `BrowserTab.startCDPSession()` (requires `--enable-proposed-api`)
  */
+/**
+ * Recover the page's real title from VS Code's browser editor label.
+ *
+ * `BrowserTab.title` is not `document.title` — VS Code composes the editor
+ * label as `"<document.title> (<origin>/)"`, so reporting it verbatim gave
+ * callers `"Google (https://www.google.com/)"` for a page actually titled
+ * `"Google"`. Only strips when the parenthesised part really is this page's
+ * address, so a page legitimately titled `"Foo (https://bar)"` survives intact.
+ */
+export function stripComposedLabel(label: string, url: string): string {
+	const match = label.match(/^(.+?)\s+\(([a-z][a-z0-9+.-]*:\/\/[^()]*|about:blank)\)$/i);
+	if (!match) return label;
+	const [, title, suffix] = match;
+	if (!url) return label;
+	try {
+		if (new URL(suffix).origin === new URL(url).origin) return title;
+	} catch {
+		// Unparseable either side — keep the label rather than guess.
+	}
+	return label;
+}
+
 export class CDPTab {
 	readonly tabId: string;
 
@@ -145,6 +167,31 @@ export class CDPTab {
 		return this._sessionId;
 	}
 
+	/**
+	 * The debug session backing this tab on the websocket fallback path, or
+	 * null on the BrowserTab path. Closing a fallback tab means terminating
+	 * this session — disconnecting CDP alone leaves the browser editor open.
+	 */
+	get debugSession(): vscode.DebugSession | null {
+		return this._session;
+	}
+
+	/**
+	 * The tab's favicon as a plain string so it survives the HTTP/MCP boundary.
+	 * `IconPath` is a union (Uri | {light,dark} | ThemeIcon), hence the probing.
+	 * Useful when several tabs share a title.
+	 */
+	get iconUri(): string | undefined {
+		const icon = this._browserTab?.icon as unknown;
+		if (!icon) return undefined;
+		if (typeof icon === 'string') return icon;
+		if (typeof icon !== 'object') return undefined;
+		const candidate = icon as { id?: string; dark?: { toString(): string }; toString(): string };
+		if (typeof candidate.id === 'string') return candidate.id;
+		if (candidate.dark) return candidate.dark.toString();
+		return candidate.toString();
+	}
+
 	/** The underlying BrowserTab, if on the proposed API path. */
 	get browserTab(): vscode.BrowserTab | null {
 		return this._browserTab;
@@ -155,13 +202,117 @@ export class CDPTab {
 		return this._browserTab?.url ?? this._lastKnownUrl ?? '';
 	}
 
-	/** Tab's current title (BrowserTab proposal only). */
+	/**
+	 * Tab's current title.
+	 *
+	 * Prefers `BrowserTab.title`, except while VS Code is still seeding it with
+	 * the page URL (which it does until the document supplies a real title). In
+	 * that window the `document.title` read by {@link refreshTitle} is the
+	 * accurate one — otherwise callers report a page's title as its URL.
+	 */
 	get title(): string {
-		return this._browserTab?.title ?? this._lastKnownTitle ?? '';
+		const fromTab = this._browserTab?.title;
+		if (fromTab) {
+			const cleaned = stripComposedLabel(fromTab, this.url);
+			if (cleaned && cleaned !== 'about:blank') return cleaned;
+		}
+		return this._lastKnownTitle || fromTab || '';
 	}
+
+	/** Fires when VS Code reports a url/title/icon change for this tab. */
+	private _onTabStateChange = new vscode.EventEmitter<void>();
 
 	private _lastKnownUrl = '';
 	private _lastKnownTitle = '';
+
+	/**
+	 * True when the bridge itself opened this tab (vs. adopting one the user
+	 * already had). Sharing enforcement only applies to the user's own pages —
+	 * a tab the bridge created is its own and is never revoked.
+	 */
+	bridgeOwned = false;
+
+	/**
+	 * Read `document.title` out of the page and cache it.
+	 *
+	 * On the BrowserTab (proposed API) path the title arrives for free from
+	 * `BrowserTab.title`. On the websocket / debug-session path nothing ever
+	 * populates it, so `title` would report `''` forever and callers would
+	 * describe a real page as untitled. Best-effort: failures leave the cached
+	 * value untouched rather than clobbering it.
+	 */
+	/**
+	 * Wait for post-navigation metadata to catch up before reporting it.
+	 *
+	 * `Page.navigate` resolves when the navigation is *committed*, not when the
+	 * tab's observable state has caught up: `BrowserTab.url` can still read
+	 * `about:blank` and `BrowserTab.title` can still be the raw URL. Callers
+	 * that answered immediately therefore described the page wrongly, and
+	 * `/tabs`, discovery, and the live `document.title` could disagree three
+	 * ways. Bounded and best-effort — a page that genuinely stays on
+	 * `about:blank` just costs the timeout.
+	 */
+	async settleNavigation(timeoutMs = 3000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+
+		// BrowserTab path: VS Code pushes url/title/icon changes via
+		// `onDidChangeBrowserTabState`, so wait on the event rather than
+		// polling. No timer loop, no extra CDP round-trip, and the values are
+		// exactly what VS Code itself believes.
+		if (this._browserTab) {
+			while (!this.metadataSettled() && Date.now() < deadline) {
+				if (!await this.waitForTabStateChange(deadline - Date.now())) break;
+			}
+			return;
+		}
+
+		// Websocket/debug-session path has no such event; fall back to a
+		// bounded poll and read `document.title` ourselves.
+		while (Date.now() < deadline) {
+			if (this.metadataSettled()) break;
+			await new Promise(resolve => setTimeout(resolve, 50));
+		}
+		await this.refreshTitle();
+	}
+
+	/** Both url and title look like real page values rather than placeholders. */
+	private metadataSettled(): boolean {
+		const url = this.url;
+		const title = this.title;
+		return !!url && url !== 'about:blank' && !!title && title !== 'about:blank' && !title.startsWith(url);
+	}
+
+	/** Resolves true on the next tab-state change, false on timeout. */
+	private waitForTabStateChange(ms: number): Promise<boolean> {
+		if (ms <= 0) return Promise.resolve(false);
+		return new Promise(resolve => {
+			const timer = setTimeout(() => { subscription.dispose(); resolve(false); }, ms);
+			const subscription = this._onTabStateChange.event(() => {
+				clearTimeout(timer);
+				subscription.dispose();
+				resolve(true);
+			});
+		});
+	}
+
+	/** Called when VS Code reports this tab's url/title/icon changed. */
+	notifyBrowserTabStateChanged(): void {
+		this._onTabStateChange.fire();
+	}
+
+	async refreshTitle(): Promise<string> {
+		try {
+			const result = await this.send('Runtime.evaluate', {
+				expression: 'document.title',
+				returnByValue: true,
+			}) as { result?: { value?: unknown } };
+			const value = result?.result?.value;
+			if (typeof value === 'string') this._lastKnownTitle = value;
+		} catch {
+			// Page may be mid-navigation or the transport may be down; keep the cached title.
+		}
+		return this._lastKnownTitle;
+	}
 
 	/** Diagnostic: the CDP sessionId for the primary page target (or null). */
 	get pageSessionId(): string | null {
@@ -646,7 +797,8 @@ export class CDPTab {
 		}
 	}
 
-	private async removeTitlePrefix(): Promise<void> {
+	/** Remove any injected title prefix and restore the page's own title. */
+	async removeTitlePrefix(): Promise<void> {
 		try {
 			const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
 			if (!hasTransport) return;

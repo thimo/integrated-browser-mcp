@@ -13,9 +13,12 @@ import { discoverPages } from './lm-pages';
  * chat enabled. So enforcement is a poll of that listing, matched by URL.
  *
  * Consequences worth knowing before turning it on:
- *  - With no signal (chat disabled, older VS Code) enforcement cannot run. It
- *    fails **open**, matching the extension's documented premise of working
- *    without Copilot. `/status` reports which mode is active.
+ *  - With no signal (chat disabled, older VS Code) sharing cannot be expressed
+ *    at all — there is no share button to press — so the bridge fails
+ *    **closed to bridge-owned tabs**: it drives only what it opened itself,
+ *    and the user's own tabs are neither accessible nor grantable. Failing
+ *    open would hand over pages that were never consented to. `/status`
+ *    reports `bridge-owned-only` in that mode.
  *  - Matching is by normalized URL, because page ids and tab ids share no
  *    namespace. Two tabs on the same URL are indistinguishable.
  *  - Revocation is bounded by the poll TTL below, not instantaneous.

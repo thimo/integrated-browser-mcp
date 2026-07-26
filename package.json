@@ -91,6 +91,36 @@
           "default": true,
           "description": "Automatically start the bridge when VS Code opens"
         },
+        "browserBridge.tabIndicator": {
+          "type": "string",
+          "default": "number",
+          "enum": [
+            "number",
+            "marker",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Prefix '(N) ' — lets you say \"reload browser 2\" and match browser_tab_list's number",
+            "Prefix a fixed symbol — shows the tab is agent-controlled without implying an ordering",
+            "Never modify tab titles"
+          ],
+          "description": "How to mark browser tabs that are under agent control. Only tabs the bridge opened itself are marked — pages you opened are never touched. Marking works by rewriting the page's real document.title (the only lever an extension has over the editor tab label), so the page can observe it: choose 'off' if a page or tool needs the unmodified title, e.g. when reading it back via browser_eval."
+        },
+        "browserBridge.tabIndicatorText": {
+          "type": "string",
+          "default": "● ",
+          "description": "The symbol used when browserBridge.tabIndicator is 'marker'. Include a trailing space if you want one."
+        },
+        "browserBridge.enforceSharing": {
+          "type": "boolean",
+          "default": false,
+          "description": "Treat VS Code's page sharing as the bridge's access model: drive only tabs the bridge opened itself, plus pages the user has shared. Unsharing then detaches the bridge (within ~2s) and later calls on that tab fail. Sharing state comes from VS Code 1.131+ with chat enabled — the only signal the browser API exposes. Where sharing cannot be expressed (chat disabled or older VS Code), the bridge restricts itself to tabs it opened rather than granting access to everything: agents still work normally, but your existing tabs stay off-limits. Matching is by URL, so two tabs on the same URL are indistinguishable. Off by default: without it, unsharing does NOT revoke access."
+        },
+        "browserBridge.lmPageDiscovery": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds."
+        },
         "browserBridge.browserType": {
           "type": "string",
           "default": "editor-browser",
@@ -105,7 +135,106 @@
           "description": "Which browser type to launch for automation"
         }
       }
-    }
+    },
+    "languageModelTools": [
+      {
+        "name": "integratedBrowser_console",
+        "displayName": "Browser Console (Integrated Browser MCP)",
+        "toolReferenceName": "browserConsole",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(terminal)",
+        "tags": [
+          "browser",
+          "debug"
+        ],
+        "userDescription": "Read buffered console output from the integrated browser",
+        "modelDescription": "Read buffered console output (log/warn/error) captured from integrated browser pages, including messages from web workers and iframes. The buffer is continuous — it contains messages emitted before this call, which a screenshot or page read cannot recover. Use for diagnosing runtime errors.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tabId": {
+              "type": "string",
+              "description": "Optional bridge tab id. Omit to aggregate across all tabs."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum entries to return (newest last). Default 50, max 200."
+            }
+          }
+        }
+      },
+      {
+        "name": "integratedBrowser_network",
+        "displayName": "Browser Network (Integrated Browser MCP)",
+        "toolReferenceName": "browserNetwork",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(radio-tower)",
+        "tags": [
+          "browser",
+          "debug"
+        ],
+        "userDescription": "Read buffered network requests from the integrated browser",
+        "modelDescription": "Read buffered network requests/responses (method, url, status, type, timing) captured from integrated browser pages. The buffer is continuous, so it includes requests already completed before this call. Use to check failing API calls, status codes, or whether a request fired at all.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tabId": {
+              "type": "string",
+              "description": "Optional bridge tab id. Omit to aggregate across all tabs."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum entries to return (newest last). Default 50, max 200."
+            },
+            "filter": {
+              "type": "string",
+              "description": "Case-insensitive substring match on the request URL."
+            }
+          }
+        }
+      },
+      {
+        "name": "integratedBrowser_downloads",
+        "displayName": "Browser Downloads (Integrated Browser MCP)",
+        "toolReferenceName": "browserDownloads",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(cloud-download)",
+        "tags": [
+          "browser"
+        ],
+        "userDescription": "Read download events from the integrated browser",
+        "modelDescription": "Read buffered download events (guid, url, suggested filename, state, bytes, resolved path) from integrated browser pages. Use to confirm a download started, completed, or where the file landed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tabId": {
+              "type": "string",
+              "description": "Optional bridge tab id. Omit to aggregate across all tabs."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum entries to return (newest last). Default 50, max 200."
+            }
+          }
+        }
+      },
+      {
+        "name": "integratedBrowser_tabs",
+        "displayName": "Browser Tabs (Integrated Browser MCP)",
+        "toolReferenceName": "browserTabs",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(browser)",
+        "tags": [
+          "browser"
+        ],
+        "userDescription": "List integrated browser tabs the bridge is driving",
+        "modelDescription": "List the integrated browser tabs this bridge is attached to: tabId, number, url, title, icon, active flag, connection state and transport. Complements the built-in browser tools by showing what the bridge itself can drive.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -118,7 +247,8 @@
     "lint": "eslint src",
     "test": "vscode-test",
     "publish:marketplace": "vsce publish --allow-proposed-apis browser",
-    "release": "scripts/release.sh"
+    "release": "scripts/release.sh",
+    "test:unit": "node tests/unit.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

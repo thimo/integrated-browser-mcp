@@ -75,34 +75,29 @@ function getBridgeUrl(): string {
 		return `http://127.0.0.1:${process.env.BROWSER_BRIDGE_PORT}`;
 	}
 	// Re-discover on every call. Caching was unsafe: VS Code windows shift
-	// ports on reload (port 3788 may have been pottagold at startup but become
-	// integrated-browser-mcp after a reload), so a cached port can silently
-	// route calls to the wrong workspace's bridge. Filesystem-reading the
-	// instances dir each time costs ~1ms, well worth the correctness.
+	// ports on reload, so a cached port can silently route calls to the wrong
+	// workspace's bridge. Reading the instances dir costs ~1ms.
 	const port = discoverPort();
 	if (port) return `http://127.0.0.1:${port}`;
 	// Last resort default — the lowest port the extension tries to bind.
 	return 'http://127.0.0.1:3788';
 }
 
-async function bridgeFetch(urlPath: string, options?: RequestInit): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function bridgeFetch(urlPath: string, init?: { method?: string; body?: string }): Promise<{ ok: boolean; data?: unknown; error?: string }> {
 	try {
 		const base = getBridgeUrl();
-		const res = await fetch(`${base}${urlPath}`, options);
+		const res = await fetch(`${base}${urlPath}`, {
+			method: init?.method ?? 'GET',
+			...(init?.body ? { headers: { 'Content-Type': 'application/json' }, body: init.body } : {}),
+		});
 		return await res.json() as { ok: boolean; data?: unknown; error?: string };
 	} catch {
-		// Each call re-discovers the port, so a second retry doesn't buy us
-		// anything beyond a clearer error message.
 		return { ok: false, error: 'Integrated Browser MCP is not reachable. Make sure VS Code is running with the extension active.' };
 	}
 }
 
 async function bridgePost(urlPath: string, body: Record<string, unknown>) {
-	return bridgeFetch(urlPath, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body),
-	});
+	return bridgeFetch(urlPath, { method: 'POST', body: JSON.stringify(body) });
 }
 
 function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
@@ -119,7 +114,13 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 const SERVER_INSTRUCTIONS = `
 This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
 
-Each tab has a stable number shown as a \`(N) \` prefix in the tab title (e.g. "(1) Pottagold", "(2) Profit and loss"). \`browser_tab_list\` returns the same number in its \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number.
+Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (The number also appears in the tab title for tabs the bridge opened, per \`browserBridge.tabIndicator\`; tabs the user opened are never marked.)
+
+If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs. In that mode discovery text from VS Code will claim shared pages "can be interacted with"; that is VS Code's copy and is not true here.
+
+Two very different setups, so check \`browser_status\` \`capabilities\` before planning:
+- **Proposed API granted** (\`capabilities.tabOpen: true\`) — full multi-tab. Open your own tab with \`browser_tab_open\`, pass its \`tabId\` everywhere, and don't touch tabs you didn't open.
+- **Not granted** (the default for a normally-installed build) — \`browser_tab_open\` fails and the bridge cannot attach to a page the user already opened. The only way to get a working tab is \`browser_navigate\` with **no** \`tabId\`: the bridge lazy-launches its own single tab and navigates it. This opens a separate page rather than taking over the user's, so it is not hijacking — but confirm with the user first if a page is already open, since the bridge tab is the only one you can drive.
 
 Target a specific tab by passing \`tabId\` (from \`browser_tab_list\` or \`browser_tab_open\`) to any interaction tool. Omit \`tabId\` to use the active tab.
 
@@ -132,7 +133,9 @@ Pick the cheapest tool for the job:
 
 \`browser_navigate\` replaces the current page of the target tab. If you want the previous page to stay accessible, use \`browser_tab_open\` instead.
 
-The bridge lazy-launches the browser on the first interaction, so the very first call in a session can take a second longer than subsequent ones. That's expected.
+\`browser_tab_list\` shows the tabs this bridge drives. On VS Code 1.131+, \`browser_pages_discover\` additionally reports integrated browser pages VS Code knows about that the bridge is *not* attached to — use it when the user refers to a page that \`browser_tab_list\` doesn't show.
+
+Lazy-launch is the attach mechanism, not just a latency note: if no tab exists, \`browser_navigate\` (with no \`tabId\`) creates and connects one. That is how you go from "no tabs" to a drivable tab when \`browser_tab_open\` is unavailable — so an empty \`browser_tab_list\` does not mean the browser is unreachable. The first such call takes a second longer while the browser starts.
 `.trim();
 
 const server = new McpServer({
@@ -160,7 +163,7 @@ server.tool(
 	'browser_eval',
 	'Run a JS expression in the page and return its value. Fastest way to read specific data (title, element text, form values, etc.). Prefer this over browser_dom or browser_screenshot for most read tasks. WARNING: runs arbitrary code — do not pass untrusted input.',
 	{
-		expression: z.string().describe('JavaScript expression to evaluate. Keep it small; return structured data for the AI to consume.'),
+		expression: z.string().describe('JavaScript expression to evaluate. Keep it small; return structured data for the AI to consume. NOTE: reading pixels back from a WebGL canvas (toDataURL/drawImage/readPixels) returns black unless the context set preserveDrawingBuffer — use browser_pixel for on-screen colours.'),
 		tabId: z.string().optional().describe(tabIdDescription),
 	},
 	async ({ expression, tabId }) => toMcpResult(await bridgePost('/eval', { expression, tabId })),
@@ -330,14 +333,41 @@ server.tool(
 	},
 );
 
+// Pixel sampling
+server.tool(
+	'browser_pixel',
+	'Read the actual on-screen colour at a point, as numbers. Use this instead of browser_eval + canvas readback: a WebGL canvas created without `preserveDrawingBuffer` has its drawing buffer cleared after compositing, so toDataURL/drawImage/readPixels return solid black regardless of what is displayed. This samples the composited screenshot instead, so it sees what the user sees. Prefer it over browser_screenshot when you want to assert a colour rather than look at one. Returns { samples: [{ hex, r, g, b, a, x, y }] }.',
+	{
+		selector: z.string().optional().describe('CSS selector; samples the centre of this element. Usually what you want.'),
+		points: z.array(z.object({ x: z.number(), y: z.number() })).optional().describe('Explicit page coordinates (CSS pixels, including scroll offset).'),
+		waitMs: z.number().optional().describe('Delay before sampling, for in-flight CSS transitions.'),
+		tabId: z.string().optional().describe(tabIdDescription),
+	},
+	async ({ selector, points, waitMs, tabId }) => toMcpResult(await bridgePost('/pixel', { selector, points, waitMs, tabId })),
+);
+
 // Snapshot (accessibility tree)
 server.tool(
 	'browser_snapshot',
-	'Return the accessibility tree of the page. Good for understanding page structure before clicking or typing. Lighter than browser_dom.',
-	{ tabId: z.string().optional().describe(tabIdDescription) },
-	async ({ tabId }) => {
-		const qs = tabId ? `?tabId=${encodeURIComponent(tabId)}` : '';
-		return toMcpResult(await bridgeFetch(`/snapshot${qs}`));
+	'Return the accessibility tree of the page as a compact, pruned projection: ignored and nameless nodes are dropped and each node is flattened to { nodeId, role, name, value?, ... }. Good for understanding page structure before clicking or typing. NOTE: on a real app page even the pruned tree can be large — scope it with `selector`, or use `interactiveOnly` when you just need the clickable/typeable elements. To read one specific value, browser_eval is far cheaper than a snapshot. Returns { nodes, totalMatched, totalRaw, truncated, note? }.',
+	{
+		tabId: z.string().optional().describe(tabIdDescription),
+		selector: z.string().optional().describe('CSS selector to scope the tree to. Strongly recommended on app pages — returns only this element and its descendants.'),
+		interactiveOnly: z.boolean().optional().describe('Only return actionable roles (button, link, textbox, checkbox, tab, …). Best first call when you intend to click or type.'),
+		limit: z.number().optional().describe('Max nodes to return (default 1500). Response reports `truncated` and `totalMatched` when it caps.'),
+		includeIgnored: z.boolean().optional().describe('Include nodes marked ignored by the accessibility tree. Off by default; they are invisible to assistive tech and mostly noise.'),
+		full: z.boolean().optional().describe('Return the raw unpruned CDP AX nodes instead. Very large — only when the compact projection is genuinely insufficient.'),
+	},
+	async ({ tabId, selector, interactiveOnly, limit, includeIgnored, full }) => {
+		const params = new URLSearchParams();
+		if (tabId) params.set('tabId', tabId);
+		if (selector) params.set('selector', selector);
+		if (interactiveOnly) params.set('interactiveOnly', 'true');
+		if (limit !== undefined) params.set('limit', String(limit));
+		if (includeIgnored) params.set('includeIgnored', 'true');
+		if (full) params.set('full', 'true');
+		const qs = params.toString();
+		return toMcpResult(await bridgeFetch(`/snapshot${qs ? `?${qs}` : ''}`));
 	},
 );
 
@@ -454,7 +484,7 @@ server.tool(
 // Status
 server.tool(
 	'browser_status',
-	'Check the bridge connection status',
+	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode pages you did not open can never be attached or driven no matter what discovery says, and browser_tab_open is unavailable. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/status')),
 );
@@ -465,12 +495,13 @@ server.tool(
 
 server.tool(
 	'browser_tab_open',
-	'Open a new browser tab at the given URL. Returns { tabId, url, title } — the tabId is the handle for subsequent tool calls. Use this when you want to keep the current page while opening another. Requires VS Code launched with --enable-proposed-api=thimo.integrated-browser-mcp.',
+	'Open a new browser tab at the given URL. Returns { tabId, url, title } — the tabId is the handle for subsequent tool calls. Use this when you want to keep the current page while opening another. REQUIRES VS Code launched with --enable-proposed-api thimo.integrated-browser-mcp; check browser_status `capabilities.tabOpen` first, because in a normally-installed build this is unavailable and the fallback is browser_navigate with no tabId (which drives the bridge\'s own single tab).',
 	{
 		url: z.string().describe('Initial URL for the new tab'),
 		makeActive: z.boolean().optional().default(true).describe('Make this tab the active (default) target for subsequent tool calls'),
+		beside: z.boolean().optional().describe('Open in an editor group beside the current one instead of the current group. Useful when working alongside the user, but it does split their layout — leave off unless asked.'),
 	},
-	async ({ url, makeActive }) => toMcpResult(await bridgePost('/tab/open', { url, makeActive })),
+	async ({ url, makeActive, beside }) => toMcpResult(await bridgePost('/tab/open', { url, makeActive, beside })),
 );
 
 server.tool(
@@ -485,6 +516,17 @@ server.tool(
 	'List every tab under the bridge. Returns an array of { tabId, number, url, title, active, state, transport }. The `number` matches the "(N) " prefix shown in each tab title — if the user says "reload browser 2", find the entry with number=2 and use its tabId. `number` is null for the 21st tab and beyond (their titles show 🤯 instead of a number); for those, refer to them by tabId or URL.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/tabs')),
+);
+
+// Page discovery via VS Code's own `list_browser_pages` LM tool (1.131+).
+// Complements browser_tab_list: that lists tabs the bridge drives, this lists
+// integrated browser pages VS Code knows about — including ones the bridge is
+// not attached to and cannot drive.
+server.tool(
+	'browser_pages_discover',
+	'Ask VS Code which integrated browser pages exist, including pages this bridge is NOT attached to (e.g. opened by the user, or by another VS Code window). Use when browser_tab_list looks empty or incomplete but the user insists a page is open. Returns { available, pages[], unsharedCount, hint }. Each page has a VS Code `pageId` (NOT a bridge tabId), plus `attachedTabId` when the bridge already drives that URL. IMPORTANT: a page WITHOUT `attachedTabId` is not a dead end — read the `hint` field, which says exactly how to act on it in this build. Typically: call browser_navigate with the page url and NO tabId, which lazy-launches the bridge\'s own tab at that URL (it does not take over the user\'s page). Check browser_status `capabilities` to know up front whether attaching to existing pages is possible. `available:false` means this VS Code build lacks the tool (needs 1.131+) — fall back to browser_tab_list.',
+	{},
+	async () => toMcpResult(await bridgeFetch('/pages')),
 );
 
 server.tool(
