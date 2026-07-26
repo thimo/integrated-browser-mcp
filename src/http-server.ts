@@ -4,8 +4,124 @@ import express from 'express';
 import type { CDPManager } from './cdp';
 import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
+import { discoverPages, isDiscoveryAvailable, isDiscoveryEnabled, type DiscoveredPage } from './lm-pages';
+import { hasProposedBrowserApi } from './cdp';
+import { isEnforcementEnabled, normalizeUrl, sharedUrls } from './sharing';
+import { decodePng, pixelAt } from './png';
 
 const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'allowAndName', 'deny', 'default']);
+
+/**
+ * Named cause + remedy for the degraded path, repeated verbatim in `/status`
+ * and in every error raised while degraded. A silent fallback previously cost
+ * an entire debugging session: shared pages never became attachable,
+ * `browser_tab_open` failed with raw internal text, and discovery text claimed
+ * pages "can be interacted with" when they could not — all of which read as
+ * extension bugs rather than one missing flag.
+ */
+const DEGRADED_WARNING =
+	'DEGRADED: the `browser` API proposal is declared but not granted, so the bridge is on the debug-session fallback. '
+	+ 'Consequences: pages you did not open cannot be attached (no attachedTabId, even once shared), browser_tab_open is unavailable, '
+	+ 'and each bridge tab shows a debug toolbar. '
+	+ 'Remedy: add "enable-proposed-api": ["thimo.integrated-browser-mcp"] to argv.json (Preferences: Configure Runtime Arguments) '
+	+ 'or launch with --enable-proposed-api thimo.integrated-browser-mcp, then fully restart VS Code.';
+
+/** Shape of the nodes CDP returns from `Accessibility.getFullAXTree`. */
+interface RawAXNode {
+	nodeId: string;
+	ignored?: boolean;
+	role?: { value?: unknown };
+	name?: { value?: unknown };
+	value?: { value?: unknown };
+	description?: { value?: unknown };
+	childIds?: string[];
+	properties?: Array<{ name: string; value?: { value?: unknown } }>;
+}
+
+/** Roles an agent can actually act on — the useful subset when `interactiveOnly`. */
+const INTERACTIVE_ROLES = new Set([
+	'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox', 'option',
+	'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'switch', 'slider',
+	'searchbox', 'spinbutton', 'treeitem',
+]);
+
+/**
+ * Roles that never carry information of their own: `InlineTextBox` duplicates
+ * the text of its parent `StaticText`, and `LineBreak` is pure layout.
+ */
+const NOISE_ROLES = new Set(['InlineTextBox', 'LineBreak']);
+
+/** Properties worth keeping; the rest is mostly ARIA bookkeeping that bloats the payload. */
+const KEPT_PROPERTIES = new Set(['checked', 'disabled', 'expanded', 'focused', 'level', 'pressed', 'required', 'selected']);
+
+function axText(field?: { value?: unknown }): string | undefined {
+	const value = field?.value;
+	return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/** Restrict a flat AX node list to `rootId` and everything beneath it. */
+export function descendantsOf(nodes: RawAXNode[], rootId: string): RawAXNode[] {
+	const byId = new Map(nodes.map(node => [node.nodeId, node]));
+	const out: RawAXNode[] = [];
+	const seen = new Set<string>();
+	const stack = [rootId];
+	while (stack.length) {
+		const id = stack.pop()!;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		const node = byId.get(id);
+		if (!node) continue;
+		out.push(node);
+		for (const child of node.childIds ?? []) stack.push(child);
+	}
+	return out;
+}
+
+/**
+ * Collapse verbose AX nodes into a compact, agent-readable projection.
+ *
+ * The raw tree carries a `{value: {type, value}}` wrapper on every field plus a
+ * long `properties` array, most of which an agent never reads. Dropping ignored
+ * nodes (invisible to assistive tech anyway) and nameless structural nodes is
+ * what turns a 291k-character dump into something usable.
+ */
+export function projectAXNodes(
+	nodes: RawAXNode[],
+	opts: { includeIgnored?: boolean; interactiveOnly?: boolean } = {},
+): Array<Record<string, unknown>> {
+	const out: Array<Record<string, unknown>> = [];
+	for (const node of nodes) {
+		if (node.ignored && !opts.includeIgnored) continue;
+
+		const role = axText(node.role);
+		const name = axText(node.name);
+		if (role && NOISE_ROLES.has(role)) continue;
+		if (opts.interactiveOnly && !(role && INTERACTIVE_ROLES.has(role))) continue;
+		// Unnamed nodes only earn their place if they are actionable: an unnamed
+		// button still matters (and flags an a11y gap), but the sea of unnamed
+		// `generic` wrappers a component framework emits is pure noise — and is
+		// most of what makes a raw SPA tree six figures of characters.
+		if (!name && !(role && INTERACTIVE_ROLES.has(role))) continue;
+
+		const entry: Record<string, unknown> = { nodeId: node.nodeId };
+		if (role) entry.role = role;
+		if (name) entry.name = name;
+		const value = axText(node.value);
+		if (value) entry.value = value;
+		const description = axText(node.description);
+		if (description) entry.description = description;
+
+		for (const prop of node.properties ?? []) {
+			if (!KEPT_PROPERTIES.has(prop.name)) continue;
+			const propValue = prop.value?.value;
+			// Skip the defaults — `disabled: false` on every node is pure noise.
+			if (propValue === false || propValue === undefined || propValue === '') continue;
+			entry[prop.name] = propValue;
+		}
+		out.push(entry);
+	}
+	return out;
+}
 
 export class BridgeServer {
 	private app: express.Application;
@@ -36,6 +152,10 @@ export class BridgeServer {
 	private requireAnyTab(lazyUrl?: (req: express.Request) => string | undefined): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
 		return (req, res, next) => {
 			const run = async () => {
+				// Enforce before creating or touching anything: /navigate is the
+				// most impactful verb, so leaving it unguarded let a caller keep
+				// driving a just-unshared tab simply by avoiding other endpoints.
+				await this.enforceSharing().catch(() => undefined);
 				if (this.cdp.tabCount === 0 && this.ensureBrowser) {
 					this.log.appendLine('[HTTP] No tabs, launching browser...');
 					await this.ensureBrowser(lazyUrl?.(req));
@@ -53,27 +173,202 @@ export class BridgeServer {
 		};
 	}
 
+	/**
+	 * Middleware for everything that is not an explicit "create a page" action.
+	 *
+	 * Reads must not mutate browser state. Lazy-launching from `/url`, `/dom`,
+	 * `/snapshot` etc. minted a page, and — because there is no URL to launch
+	 * at — dropped the user into VS Code's new-tab URL prompt, blocking a
+	 * read on a human. Worse, cancelling that prompt still yielded a live
+	 * `about:blank` tab indistinguishable from an accepted one, so an agent
+	 * could read `about:blank` and confidently report it as the page state.
+	 * Page creation now belongs to `/navigate` and `/tab/open` alone.
+	 */
+	private requireExistingTab(): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
+		return (_req, res, next) => {
+			this.enforceSharing()
+				.catch(err => this.log.appendLine(`[Bridge] Sharing enforcement failed: ${err}`))
+				.then(() => this.afterEnforcement(res, next));
+		};
+	}
+
+	private afterEnforcement(res: express.Response, next: express.NextFunction): void {
+		{
+			if (this.cdp.tabCount === 0) {
+				res.json({
+					ok: false,
+					reason: 'no_attached_page',
+					error: 'No attached page. This is a read-only call, so the bridge did not create one.',
+					hint: 'Call browser_navigate with a url and no tabId to create and attach a page, then retry. browser_tab_list shows attached tabs; browser_status reports capabilities.',
+					// Name the cause here too: "no attached page" while degraded
+					// usually means the page exists but is unattachable, which
+					// is a very different situation from "no page open".
+					...(hasProposedBrowserApi() ? {} : { degraded: true, warning: DEGRADED_WARNING }),
+				});
+				return;
+			}
+			if (this.cdp.state !== 'connected') {
+				res.json({ ok: false, reason: 'not_connected', error: 'CDP not connected' });
+				return;
+			}
+			next();
+		};
+	}
+
+	/**
+	 * Detach from any user-owned tab whose page is no longer shared, when
+	 * `browserBridge.enforceSharing` is on. Runs before tab-targeted work so a
+	 * revoked page cannot be driven through a `tabId` captured earlier.
+	 */
+	private async enforceSharing(): Promise<void> {
+		if (!isEnforcementEnabled()) return;
+		const { urls, available } = await sharedUrls(this.log);
+		for (const info of this.cdp.list()) {
+			const tab = this.cdp.getTab(info.tabId);
+			// Tabs the bridge opened are its own — always accessible, and the
+			// reason enforcement never blocks the agent from working.
+			if (!tab || tab.bridgeOwned) continue;
+			if (available && info.url && urls.has(normalizeUrl(info.url))) continue;
+			// With no sharing signal (Copilot/chat off, or VS Code < 1.131) the
+			// user has no way to *grant* access to their own tabs — there is no
+			// share button to press. Failing open would hand over everything
+			// they never consented to; failing fully closed would be useless.
+			// So the user's tabs stay off-limits and the agent works in tabs it
+			// opens itself, which needs no consent to express.
+			await this.cdp.revokeTab(
+				info.tabId,
+				available
+					? 'page no longer shared'
+					: 'sharing cannot be expressed in this VS Code (chat disabled or < 1.131), so only bridge-opened tabs are accessible',
+			);
+		}
+	}
+
+	/**
+	 * Report whether unsharing actually revokes access, without overstating it.
+	 * Enforcement is opt-in *and* depends on a signal that may be absent, so
+	 * "enforced" means both conditions hold — never just the setting.
+	 */
+	private async sharingStatus(): Promise<Record<string, unknown>> {
+		const enabled = isEnforcementEnabled();
+		if (!enabled) {
+			return {
+				enforced: false,
+				mode: 'off',
+				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Browser Bridge: Stop). Set browserBridge.enforceSharing to make unsharing revoke.',
+			};
+		}
+		const { available } = await sharedUrls(this.log);
+		return available
+			? {
+				enforced: true,
+				mode: 'enforcing',
+				note: 'browserBridge.enforceSharing is on: the bridge drives only tabs it opened itself plus pages VS Code reports as shared. Unsharing detaches within ~2s and later calls on that tabId fail. Matching is by URL, so two tabs on the same URL are indistinguishable.',
+			}
+			: {
+				enforced: true,
+				mode: 'bridge-owned-only',
+				note: 'browserBridge.enforceSharing is on, but sharing cannot be expressed in this VS Code (needs 1.131+ and chat enabled) — there is no share button to press. The bridge therefore drives ONLY tabs it opened itself; the user\'s own tabs are not accessible and cannot be granted. Agents work normally here: browser_tab_open / browser_navigate create bridge-owned tabs. Enable chat if you need to grant access to your existing tabs.',
+			};
+	}
+
+	/**
+	 * Run enforcement, then the handler. For routes that take no
+	 * tab-requiring middleware but still act on, close, or read from a
+	 * specific tab — every one of those was a way around the guard.
+	 */
+	private guarded(
+		handler: (req: express.Request, res: express.Response) => void | Promise<void>,
+	): (req: express.Request, res: express.Response) => void {
+		return (req, res) => {
+			this.enforceSharing()
+				.catch(err => this.log.appendLine(`[Bridge] Sharing enforcement failed: ${err}`))
+				.then(() => handler(req, res))
+				.catch(err => res.json({ ok: false, error: String(err instanceof Error ? err.message : err) }));
+		};
+	}
+
 	/** Resolve the target tab for a request (query `?tabId=` or body `tabId`). */
 	private resolveTab(req: express.Request): { tab?: CDPTab; error?: string } {
 		const tabId = (req.query.tabId as string | undefined) ?? (req.body?.tabId as string | undefined);
 		const tab = this.cdp.getTab(tabId);
 		if (!tab) {
+			// Distinguish "revoked" from "never existed": an agent holding a
+			// tabId from before an unshare needs to know its access was
+			// withdrawn, not that it mistyped an id.
+			const revoked = tabId ? this.cdp.revokedReason(tabId) : undefined;
+			if (revoked) {
+				return { error: `Tab ${tabId} is no longer accessible: ${revoked}. The user unshared this page; ask them to share it again if you still need it.` };
+			}
 			return { error: tabId ? `No tab with id ${tabId}` : 'No active tab. Use browser_tab_open first.' };
 		}
 		return { tab };
 	}
 
+	/**
+	 * Annotate VS Code-reported pages with the bridge tab serving the same URL,
+	 * so an agent can tell which discovered pages it can already drive. Matched
+	 * on normalized URL because page ids and tab ids come from different
+	 * namespaces and share no identifier.
+	 */
+	private linkToTabs(pages: DiscoveredPage[]): DiscoveredPage[] {
+		const byUrl = new Map<string, string>();
+		for (const tab of this.cdp.list()) {
+			if (tab.url) byUrl.set(normalizeUrl(tab.url), tab.tabId);
+		}
+		return pages.map(page => {
+			const tabId = page.url ? byUrl.get(normalizeUrl(page.url)) : undefined;
+			return tabId ? { ...page, attachedTabId: tabId } : page;
+		});
+	}
+
 	private setupRoutes(): void {
-		const anyTab = this.requireAnyTab();
+		const existingTab = this.requireExistingTab();
 		const anyTabLazyNavigate = this.requireAnyTab(req => req.body?.url as string | undefined);
 
 		// Health / diagnostic
-		this.app.get('/status', (_req, res) => {
+		this.app.get('/status', async (_req, res) => {
+			// Report what this build can actually do *before* a tool has to find
+			// out by failing, and surface pages that exist but aren't attached —
+			// otherwise every field reads "nothing to act on" while a real,
+			// reachable page is sitting there.
+			const proposedApi = hasProposedBrowserApi();
+			let attachablePages = 0;
+			if (isDiscoveryEnabled() && isDiscoveryAvailable()) {
+				try {
+					const discovery = await discoverPages(this.log);
+					attachablePages = discovery.pages.length;
+				} catch {
+					// Discovery is advisory; never let it break /status.
+				}
+			}
 			res.json({
 				ok: true,
 				data: {
 					cdp: this.cdp.state,
 					server: true,
+					// Degradation used to be silent: the bridge fell back to the
+					// debug-session path and every field still read "fine", so
+					// agents diagnosed a misconfiguration as a pile of bugs.
+					// Say it loudly, at the top level, in one obvious place.
+					degraded: !proposedApi,
+					...(proposedApi ? {} : { warning: DEGRADED_WARNING }),
+					capabilities: {
+						browserProposal: proposedApi,
+						degraded: !proposedApi,
+						tabOpen: proposedApi,
+						attachExistingPages: proposedApi,
+						multiTab: proposedApi,
+						reason: proposedApi ? undefined : DEGRADED_WARNING,
+					},
+					attachablePages,
+					// The bridge's access does not come from VS Code's sharing
+					// model and cannot be revoked by it: `BrowserTab` exposes no
+					// sharing state, so share/unshare is invisible here. Saying
+					// so explicitly matters because discovery *does* honour
+					// unshare, which makes the system look like it enforces
+					// something it does not.
+					sharing: await this.sharingStatus(),
 					transport: this.cdp.transport,
 					activeTabId: this.cdp.activeTabId,
 					tabCount: this.cdp.tabCount,
@@ -83,47 +378,76 @@ export class BridgeServer {
 					networkBufferSize: this.cdp.network.length,
 					events: this.cdp.events,
 					emulatePath: this.emulatePath,
+					lmPageDiscovery: {
+						enabled: isDiscoveryEnabled(),
+						available: isDiscoveryAvailable(),
+					},
 				},
 			});
 		});
 
 		// Tab management
-		this.app.get('/tabs', (_req, res) => {
+		this.app.get('/tabs', async (_req, res) => {
+			// Enforce first: a revoked tab must not be listed, because listing
+			// it is how an agent re-acquires a tabId it should no longer have.
+			await this.enforceSharing().catch(() => undefined);
+			// Backfill titles the websocket path never populates, so tabs don't
+			// come back as untitled. Best-effort and bounded to connected tabs.
+			await Promise.all(
+				this.cdp.list()
+					.filter(info => !info.title && info.state === 'connected')
+					.map(info => this.cdp.getTab(info.tabId)?.refreshTitle().catch(() => undefined)),
+			);
 			res.json({ ok: true, data: this.cdp.list() });
+		});
+
+		// Integrated browser pages known to VS Code itself, including ones this
+		// bridge has not attached to. Requires VS Code 1.131+; degrades to
+		// `available: false` with a reason on older builds.
+		this.app.get('/pages', async (_req, res) => {
+			try {
+				const discovery = await discoverPages(this.log);
+				res.json({ ok: true, data: { ...discovery, pages: this.linkToTabs(discovery.pages) } });
+			} catch (err) {
+				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+			}
 		});
 
 		this.app.post('/tab/open', async (req, res) => {
 			try {
 				const url = req.body.url;
 				const makeActive = req.body.makeActive !== false;
+				const beside = req.body.beside === true;
 				if (!url) {
 					res.json({ ok: false, error: 'Missing url' });
 					return;
 				}
-				const tab = await this.cdp.openTab(url, makeActive);
-				res.json({ ok: true, data: { tabId: tab.tabId, url: tab.url, title: tab.title } });
+				const tab = await this.cdp.openTab(url, makeActive, beside);
+				res.json({ ok: true, data: { tabId: tab.tabId, url: tab.url, title: tab.title, icon: tab.iconUri } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
 			}
 		});
 
-		this.app.post('/tab/close/:tabId', async (req, res) => {
+		this.app.post('/tab/close/:tabId', this.guarded(async (req, res) => {
 			try {
-				await this.cdp.closeTab(req.params.tabId);
-				res.json({ ok: true, data: { closed: req.params.tabId } });
+				const tabId = String(req.params.tabId);
+				await this.cdp.closeTab(tabId);
+				res.json({ ok: true, data: { closed: tabId } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
 			}
-		});
+		}));
 
-		this.app.post('/tab/activate/:tabId', (req, res) => {
+		this.app.post('/tab/activate/:tabId', this.guarded((req, res) => {
 			try {
-				this.cdp.activate(req.params.tabId);
-				res.json({ ok: true, data: { active: req.params.tabId } });
+				const tabId = String(req.params.tabId);
+				this.cdp.activate(tabId);
+				res.json({ ok: true, data: { active: tabId } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
 			}
-		});
+		}));
 
 		// Navigation
 		this.app.post('/navigate', anyTabLazyNavigate, async (req, res) => {
@@ -136,14 +460,18 @@ export class BridgeServer {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
 				const result = await resolved.tab.send('Page.navigate', { url });
-				res.json({ ok: true, data: result });
+				// Settle the title before answering: on the websocket path nothing
+				// else populates it, so a caller reading straight from the response
+				// (or a follow-up /tabs) would report a real page as untitled.
+				const title = await resolved.tab.refreshTitle();
+				res.json({ ok: true, data: { ...(result as object), tabId: resolved.tab.tabId, url: resolved.tab.url, title } });
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
 			}
 		});
 
 		// Eval
-		this.app.post('/eval', anyTab, async (req, res) => {
+		this.app.post('/eval', existingTab, async (req, res) => {
 			try {
 				const { expression } = req.body;
 				if (!expression) {
@@ -168,7 +496,7 @@ export class BridgeServer {
 		});
 
 		// Click
-		this.app.post('/click', anyTab, async (req, res) => {
+		this.app.post('/click', existingTab, async (req, res) => {
 			try {
 				const { selector } = req.body;
 				if (!selector) {
@@ -201,7 +529,7 @@ export class BridgeServer {
 		});
 
 		// Type
-		this.app.post('/type', anyTab, async (req, res) => {
+		this.app.post('/type', existingTab, async (req, res) => {
 			try {
 				const { selector, text, submit } = req.body;
 				if (!selector || text === undefined) {
@@ -244,7 +572,7 @@ export class BridgeServer {
 		});
 
 		// Scroll
-		this.app.post('/scroll', anyTab, async (req, res) => {
+		this.app.post('/scroll', existingTab, async (req, res) => {
 			try {
 				const deltaX = Number(req.body.deltaX) || 0;
 				const deltaY = Number(req.body.deltaY) || 0;
@@ -273,7 +601,85 @@ export class BridgeServer {
 		// sleeps before the capture — needed when the page is mid-CSS-
 		// transition (theme flip, view swap), where `className` changes
 		// synchronously but paint lags by the transition duration.
-		this.app.get('/screenshot', anyTab, async (req, res) => {
+		// Numeric colour sampling. In-page readback of a WebGL canvas returns
+		// black unless the context was created with `preserveDrawingBuffer`,
+		// because the drawing buffer is cleared once the frame is composited.
+		// A screenshot captures the composited output instead, so sampling it
+		// server-side gives a real value — and an assertable number rather than
+		// an image the caller has to look at.
+		this.app.post('/pixel', existingTab, async (req, res) => {
+			try {
+				const resolved = this.resolveTab(req);
+				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
+				const tab = resolved.tab;
+
+				const points: Array<{ x: number; y: number; from?: string }> = [];
+				if (Array.isArray(req.body?.points)) {
+					for (const raw of req.body.points) {
+						const x = Number(raw?.x);
+						const y = Number(raw?.y);
+						// NaN/Infinity would reach Page.captureScreenshot as a clip
+						// value and fail obscurely inside CDP; reject it here.
+						if (!Number.isFinite(x) || !Number.isFinite(y)) {
+							res.json({ ok: false, error: `Invalid point ${JSON.stringify(raw)}: x and y must be finite numbers.` });
+							return;
+						}
+						points.push({ x, y });
+					}
+				}
+
+				// A selector is usually what the caller actually means: sample the
+				// centre of this element. Page coordinates, so scroll is included.
+				if (req.body?.selector) {
+					const probe = await tab.send('Runtime.evaluate', {
+						expression: `(() => {
+							const el = document.querySelector(${JSON.stringify(req.body.selector)});
+							if (!el) return null;
+							const r = el.getBoundingClientRect();
+							if (!r.width || !r.height) return { empty: true };
+							return { x: r.left + window.scrollX + r.width / 2, y: r.top + window.scrollY + r.height / 2 };
+						})()`,
+						returnByValue: true,
+					}) as { result?: { value?: { x: number; y: number; empty?: boolean } | null } };
+					const value = probe?.result?.value;
+					if (!value) { res.json({ ok: false, error: `No element matches selector: ${req.body.selector}` }); return; }
+					if (value.empty) { res.json({ ok: false, error: `Element has zero size: ${req.body.selector}` }); return; }
+					points.push({ x: value.x, y: value.y, from: req.body.selector });
+				}
+
+				if (!points.length) { res.json({ ok: false, error: 'Provide `selector`, or `points` as [{x, y}] in page coordinates.' }); return; }
+				if (points.length > 32) { res.json({ ok: false, error: 'At most 32 points per call.' }); return; }
+
+				const waitMs = Math.min(10000, Math.max(0, Number(req.body?.waitMs) || 0));
+				if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+
+				// One 1x1 capture per point rather than one big capture plus
+				// coordinate maths: it sidesteps device-pixel-ratio scaling
+				// entirely, since the clip is expressed in CSS pixels.
+				const samples = [];
+				for (const point of points) {
+					const shot = await tab.send('Page.captureScreenshot', {
+						format: 'png',
+						clip: { x: point.x, y: point.y, width: 1, height: 1, scale: 1 },
+					}) as { data: string };
+					const image = decodePng(Buffer.from(shot.data, 'base64'));
+					samples.push({ ...pixelAt(image, 0, 0), x: point.x, y: point.y, ...(point.from ? { selector: point.from } : {}) });
+				}
+				res.json({
+					ok: true,
+					data: {
+						samples,
+						note: points.length > 1
+							? 'Each point is captured separately, so an animating page may return values from different frames.'
+							: undefined,
+					},
+				});
+			} catch (err) {
+				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
+			}
+		});
+
+		this.app.get('/screenshot', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -311,7 +717,7 @@ export class BridgeServer {
 		// with whichever side gets fixed first. `/status` exposes which
 		// path won most recently for debugging. `Emulation.clearDevice-
 		// MetricsOverride` clears either override, so reset is one call.
-		this.app.post('/emulate', anyTab, async (req, res) => {
+		this.app.post('/emulate', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -373,7 +779,7 @@ export class BridgeServer {
 		// Pair with `browser_emulate` first to anchor the viewport at a
 		// real desktop/mobile size — slicing the editor pane's natural
 		// width gives meaningless results.
-		this.app.get('/screenshot-slice', anyTab, async (req, res) => {
+		this.app.get('/screenshot-slice', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -448,7 +854,7 @@ export class BridgeServer {
 		//     against non-whitespace, insert a single space. A boundary
 		//     character on either side (punctuation, whitespace) opts out
 		//     so we don't break `<strong>word</strong>.`.
-		this.app.get('/markdown', anyTab, async (req, res) => {
+		this.app.get('/markdown', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -516,19 +922,67 @@ export class BridgeServer {
 		});
 
 		// Accessibility snapshot
-		this.app.get('/snapshot', anyTab, async (req, res) => {
+		this.app.get('/snapshot', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
-				const result = await resolved.tab.send('Accessibility.getFullAXTree') as { nodes: unknown[] };
-				res.json({ ok: true, data: result.nodes });
+				// A real SPA produces a six-figure-character full AX tree, which
+				// blows the model's token ceiling and costs a round trip. Prune
+				// and project by default; `full=true` restores the raw dump.
+				const full = req.query.full === 'true';
+				const includeIgnored = req.query.includeIgnored === 'true';
+				const interactiveOnly = req.query.interactiveOnly === 'true';
+				const selector = req.query.selector as string | undefined;
+				const limit = Math.max(1, Number(req.query.limit) || 1500);
+
+				let rootId: string | undefined;
+				if (selector) {
+					const doc = await resolved.tab.send('DOM.getDocument', { depth: -1 }) as { root: { nodeId: number } };
+					const found = await resolved.tab.send('DOM.querySelector', {
+						nodeId: doc.root.nodeId,
+						selector,
+					}) as { nodeId: number };
+					if (!found?.nodeId) {
+						res.json({ ok: false, error: `No element matches selector: ${selector}` });
+						return;
+					}
+					const partial = await resolved.tab.send('Accessibility.getPartialAXTree', {
+						nodeId: found.nodeId,
+						fetchRelatives: false,
+					}) as { nodes: RawAXNode[] };
+					rootId = partial.nodes?.[0]?.nodeId;
+				}
+
+				const tree = await resolved.tab.send('Accessibility.getFullAXTree') as { nodes: RawAXNode[] };
+				let nodes = tree.nodes ?? [];
+
+				if (rootId) nodes = descendantsOf(nodes, rootId);
+				if (full) {
+					res.json({ ok: true, data: nodes });
+					return;
+				}
+
+				const projected = projectAXNodes(nodes, { includeIgnored, interactiveOnly });
+				const truncated = projected.length > limit;
+				res.json({
+					ok: true,
+					data: {
+						nodes: projected.slice(0, limit),
+						totalMatched: projected.length,
+						totalRaw: nodes.length,
+						truncated,
+						...(truncated
+							? { note: `Showing ${limit} of ${projected.length} nodes. Narrow with selector=, or raise limit=. For specific values prefer /eval.` }
+							: {}),
+					},
+				});
 			} catch (err) {
 				res.json({ ok: false, error: String(err) });
 			}
 		});
 
 		// DOM
-		this.app.get('/dom', anyTab, async (req, res) => {
+		this.app.get('/dom', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -543,15 +997,15 @@ export class BridgeServer {
 		});
 
 		// Console — filter by tabId when provided, aggregated otherwise
-		this.app.get('/console', (req, res) => {
+		this.app.get('/console', this.guarded((req, res) => {
 			const limit = parseInt(req.query.limit as string) || 50;
 			const tabId = req.query.tabId as string | undefined;
 			const entries = tabId ? this.cdp.consoleForTab(tabId) : this.cdp.console;
 			res.json({ ok: true, data: entries.slice(-limit) });
-		});
+		}));
 
 		// Network — filter by tabId when provided, aggregated otherwise
-		this.app.get('/network', (req, res) => {
+		this.app.get('/network', this.guarded((req, res) => {
 			const limit = parseInt(req.query.limit as string) || 50;
 			const tabId = req.query.tabId as string | undefined;
 			const filter = req.query.filter as string | undefined;
@@ -560,20 +1014,20 @@ export class BridgeServer {
 				entries = entries.filter(e => e.url.includes(filter));
 			}
 			res.json({ ok: true, data: entries.slice(-limit) });
-		});
+		}));
 
-		this.app.post('/network/clear', (req, res) => {
+		this.app.post('/network/clear', this.guarded((req, res) => {
 			const tabId = req.query.tabId as string | undefined;
 			this.cdp.clearNetwork(tabId);
 			res.json({ ok: true, data: { cleared: tabId ?? 'all' } });
-		});
+		}));
 
 		// Download behavior. Replaces the native save dialog with a configured
 		// directory so an agent can download files headless. Path scoping to
 		// the workspace happens in the MCP layer (browser_download_set);
 		// callers hitting this endpoint directly (curl, scripts) pass an
 		// absolute path and own the consequences.
-		this.app.post('/download/set', anyTab, async (req, res) => {
+		this.app.post('/download/set', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -597,15 +1051,15 @@ export class BridgeServer {
 			}
 		});
 
-		this.app.get('/downloads', (req, res) => {
+		this.app.get('/downloads', this.guarded((req, res) => {
 			const limit = parseInt(req.query.limit as string) || 20;
 			const tabId = req.query.tabId as string | undefined;
 			const entries = tabId ? this.cdp.downloadsForTab(tabId) : this.cdp.downloads;
 			res.json({ ok: true, data: entries.slice(-limit) });
-		});
+		}));
 
 		// URL
-		this.app.get('/url', anyTab, async (req, res) => {
+		this.app.get('/url', existingTab, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }

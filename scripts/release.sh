@@ -166,7 +166,7 @@ path = 'CHANGELOG.md'
 with open(path) as f:
     text = f.read()
 # Match the literal '## Unreleased' header line, replace with the dated heading.
-new = f'## [{version}] — {today}'
+new = f'## [{version}] - {today}'
 text, n = re.subn(r'^## Unreleased[ \t]*$', new, text, count=1, flags=re.MULTILINE)
 if n == 0:
     sys.exit("Could not find '## Unreleased' line to replace")

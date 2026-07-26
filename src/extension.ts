@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { CDPManager, hasProposedBrowserApi } from './cdp';
 import { BridgeServer } from './http-server';
 import { StatusBar } from './status-bar';
+import { registerLanguageModelTools } from './lm-tools';
 
 const MCP_KEY = 'integrated-browser-mcp';
 const STABLE_DIR = path.join(os.homedir(), '.integrated-browser-mcp');
@@ -70,7 +71,21 @@ export function activate(context: vscode.ExtensionContext) {
 				});
 			}
 		}),
+		vscode.workspace.onDidChangeConfiguration(event => {
+			// Re-apply or clear indicators immediately. Without this, switching
+			// the setting off would leave every already-marked page carrying a
+			// modified title until it happened to be reopened.
+			if (event.affectsConfiguration('browserBridge.tabIndicator')
+				|| event.affectsConfiguration('browserBridge.tabIndicatorText')) {
+				cdp?.refreshIndicators().catch(err => log.appendLine(`[Bridge] Indicator refresh failed: ${err}`));
+			}
+		}),
 	);
+
+	// Contribute the buffer tools VS Code's own browser toolset lacks. Done at
+	// activation (not per-start) so they exist regardless of bridge state; each
+	// reports cleanly when the bridge is stopped.
+	registerLanguageModelTools(context, () => cdp, log);
 
 	const config = vscode.workspace.getConfiguration('browserBridge');
 	if (config.get<boolean>('autoStart', true)) {
@@ -88,22 +103,28 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 	const preferredPort = config.get<number>('httpPort', 3788);
 
 	try {
-		// 0. Clean up stale instance files from dead processes
+		// 0. Publish the current MCP server first. A client (e.g. Claude Code)
+		// starting alongside VS Code spawns whatever build is on disk at that
+		// instant; syncing before the bridge comes up shrinks the window in
+		// which it picks up the previous one — which matters now that the
+		// transport can change between builds.
+		await syncMcpServer(context);
+
+		// 1. Clean up stale instance files from dead processes
 		await cleanStaleInstances();
 
-		// 1. CDP manager
+		// 2. CDP manager
 		cdp = new CDPManager(log);
 		cdp.onStateChange(state => statusBar.update(state, running, cdp.transport, summarizeTabs()));
 
-		// 2. HTTP server (with lazy browser launch callback)
+		// 3. HTTP server (with lazy browser launch callback)
 		httpServer = new BridgeServer(cdp, log);
 		httpServer.setEnsureBrowser(url => ensureBrowser(url));
-		const port = await httpServer.start(preferredPort);
-		actualPort = port;
+		actualPort = await httpServer.start(preferredPort);
 		running = true;
 		statusBar.update(cdp.state, true, cdp.transport, summarizeTabs());
 
-		// 3. Wire BrowserTab lifecycle events when the proposed API is available.
+		// 4. Wire BrowserTab lifecycle events when the proposed API is available.
 		//    Any failure here is downgraded to the fallback path rather than
 		//    failing startup: the bridge is fully functional without the
 		//    proposal (single tab, no worker events), so a proposal that is
@@ -124,6 +145,12 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 					}),
 					vscode.window.onDidChangeActiveBrowserTab(tab => {
 						cdp.syncActive(tab);
+						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
+					}),
+					// url/title/icon changes arrive as a push, so navigation
+					// settling needs no polling and no extra CDP round-trip.
+					vscode.window.onDidChangeBrowserTabState(tab => {
+						cdp.notifyBrowserTabState(tab);
 						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
 					}),
 				);
@@ -150,14 +177,16 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 			// Otherwise, browser will be launched lazily on first request.
 		}
 
-		// 4. Register this instance for MCP discovery
-		await registerInstance(port);
+		// 5. Register this instance for MCP discovery
+		await registerInstance(actualPort);
 
-		// 5. Sync MCP server and configure Claude
-		await syncMcpServer(context);
+		// 6. Configure Claude (server already synced above), and offer the same
+		//    server to VS Code-hosted MCP clients through the official API so
+		//    they do not depend on us editing another tool's config file.
+		registerMcpProvider(context);
 		await configureClaude();
 
-		log.appendLine(`[Bridge] Started successfully on port ${port}`);
+		log.appendLine(`[Bridge] Started successfully on port ${actualPort}`);
 	} catch (err) {
 		log.appendLine(`[Bridge] Failed to start: ${err}`);
 		vscode.window.showErrorMessage(`Browser MCP failed to start: ${err}`);
@@ -220,6 +249,9 @@ async function stopBridge(): Promise<void> {
 	running = false;
 	actualPort = null;
 	await cdp?.dispose();
+	// Null it out: the contributed LM tools hold a getter for this and would
+	// otherwise keep reading a disposed CDPManager after a stop.
+	cdp = undefined as unknown as CDPManager;
 	await httpServer?.stop();
 	await unregisterInstance();
 	statusBar?.update('disconnected', false, null, { count: 0 });
@@ -314,6 +346,32 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
 		await cdp.adoptDebugSession(session);
 	} catch (err) {
 		log.appendLine(`[Bridge] CDP connect error: ${err}`);
+	}
+}
+
+/**
+ * Publish the bundled MCP server through VS Code's own registry.
+ *
+ * Complements — does not replace — the `~/.claude.json` write, which the
+ * Claude Code CLI still needs. Clients hosted inside VS Code can discover the
+ * bridge from here instead, so we reach into fewer files we do not own.
+ * Feature-detected: the API is stable in 1.101+ but this extension supports
+ * older builds.
+ */
+function registerMcpProvider(context: vscode.ExtensionContext): void {
+	const lm = vscode.lm as unknown as { registerMcpServerDefinitionProvider?: unknown };
+	if (typeof lm.registerMcpServerDefinitionProvider !== 'function') return;
+	try {
+		context.subscriptions.push(
+			vscode.lm.registerMcpServerDefinitionProvider('integratedBrowserMcp', {
+				provideMcpServerDefinitions: () => [
+					new vscode.McpStdioServerDefinition('Integrated Browser', 'node', [STABLE_SERVER]),
+				],
+			}),
+		);
+		log.appendLine('[MCP] Registered server definition with VS Code');
+	} catch (err) {
+		log.appendLine(`[MCP] Server definition provider unavailable: ${err}`);
 	}
 }
 
