@@ -80,12 +80,14 @@ function discoverInstance(): Instance | null {
  */
 function resolveEndpoints(): Array<{ socketPath?: string; port?: number }> {
 	// Env override takes priority (manual config / cross-boundary setups where
-	// the MCP server and extension host do not share a filesystem).
-	if (process.env.BROWSER_BRIDGE_PORT) {
-		return [{ port: Number(process.env.BROWSER_BRIDGE_PORT) }];
-	}
+	// the MCP server and extension host do not share a filesystem). Socket first,
+	// matching the socket-preferred policy everywhere else.
 	if (process.env.BROWSER_BRIDGE_SOCKET) {
 		return [{ socketPath: process.env.BROWSER_BRIDGE_SOCKET }];
+	}
+	if (process.env.BROWSER_BRIDGE_PORT) {
+		const envPort = Number(process.env.BROWSER_BRIDGE_PORT);
+		if (Number.isFinite(envPort) && envPort > 0) return [{ port: envPort }];
 	}
 	const inst = discoverInstance();
 	if (inst) {
@@ -110,10 +112,12 @@ function resolveEndpoints(): Array<{ socketPath?: string; port?: number }> {
  * dispatcher, so go through `http.request`, which speaks both transports with
  * the same call shape.
  */
+const REQUEST_TIMEOUT_MS = 30000;
+
 function requestOne(endpoint: { socketPath?: string; port?: number }, urlPath: string, method: string, body?: string): Promise<string> {
 	const options: http.RequestOptions = endpoint.socketPath
-		? { socketPath: endpoint.socketPath, path: urlPath, method }
-		: { host: '127.0.0.1', port: endpoint.port, path: urlPath, method };
+		? { socketPath: endpoint.socketPath, path: urlPath, method, timeout: REQUEST_TIMEOUT_MS }
+		: { host: '127.0.0.1', port: endpoint.port, path: urlPath, method, timeout: REQUEST_TIMEOUT_MS };
 	if (body) {
 		options.headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) };
 	}
@@ -122,8 +126,16 @@ function requestOne(endpoint: { socketPath?: string; port?: number }, urlPath: s
 			let data = '';
 			res.setEncoding('utf-8');
 			res.on('data', chunk => data += chunk);
-			res.on('end', () => resolve(data));
+			res.on('error', reject); // response socket destroyed mid-body: don't hang
+			res.on('end', () => {
+				// Surface HTTP errors instead of feeding an error page to JSON.parse.
+				const status = res.statusCode ?? 0;
+				if (status >= 400) { reject(new Error(`bridge returned HTTP ${status}`)); return; }
+				resolve(data);
+			});
 		});
+		// A wedged listener that accepts but never responds must not hang forever.
+		req.on('timeout', () => req.destroy(new Error('bridge request timed out')));
 		req.on('error', reject);
 		if (body) req.write(body);
 		req.end();
@@ -147,8 +159,9 @@ async function bridgeFetch(urlPath: string, init?: { method?: string; body?: str
 	try {
 		const text = await httpRequest(urlPath, init?.method ?? 'GET', init?.body);
 		return JSON.parse(text) as { ok: boolean; data?: unknown; error?: string };
-	} catch {
-		return { ok: false, error: 'Integrated Browser MCP is not reachable. Make sure VS Code is running with the extension active.' };
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		return { ok: false, error: `Integrated Browser MCP is not reachable (${detail}). Make sure VS Code is running with the extension active.` };
 	}
 }
 

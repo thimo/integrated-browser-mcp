@@ -383,6 +383,12 @@ export class BridgeServer {
 					// something it does not.
 					sharing: await this.sharingStatus(),
 					transport: this.cdp.transport,
+					// The listening endpoint, so a user/agent can see whether the
+					// bridge is on a socket or fell back to a TCP port (the `auto`
+					// transport does that silently otherwise).
+					endpoint: this.socketPath
+						? { transport: 'socket', socketPath: this.socketPath }
+						: { transport: 'tcp', port: this.port },
 					activeTabId: this.cdp.activeTabId,
 					tabCount: this.cdp.tabCount,
 					pageSessionId: this.cdp.pageSessionId,
@@ -1146,12 +1152,23 @@ export class BridgeServer {
 			});
 			server.once('error', err => { server.close(); reject(err); });
 		});
-		// Defence in depth: the owner-only parent directory is what actually
-		// prevents another local user reaching this, since there is an
-		// unavoidable window between bind and chmod. Named pipes are not
-		// filesystem objects and have no mode to set.
+		// The owner-only parent directory is the primary guard (there is an
+		// unavoidable window between bind and chmod). But a *swallowed* chmod
+		// failure previously left a world-reachable /eval with no signal: verify
+		// the socket really is owner-only, and on failure tear down and throw so
+		// `auto` falls back to TCP and `socket` errors loudly rather than serving
+		// arbitrary JS execution to other local users. Named pipes have no mode.
 		if (process.platform !== 'win32') {
-			try { fs.chmodSync(socketPath, 0o600); } catch { /* best effort */ }
+			try {
+				fs.chmodSync(socketPath, 0o600);
+				const mode = fs.statSync(socketPath).mode & 0o777;
+				if (mode & 0o077) throw new Error(`socket is group/world-accessible (mode ${mode.toString(8)})`);
+			} catch (err) {
+				try { this.server?.close(); } catch { /* ignore */ }
+				try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
+				this.server = null;
+				throw new Error(`Refusing to serve on an unsecured socket ${socketPath}: ${err instanceof Error ? err.message : err}`);
+			}
 		}
 		this.socketPath = socketPath;
 		this.log.appendLine(`[HTTP] Server listening on ${socketPath} (no TCP port)`);
