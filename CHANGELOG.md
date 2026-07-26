@@ -5,7 +5,7 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.6.1] — 2026-07-26
 
 ### Fixed
 - Bridge no longer crashes at startup on VS Code builds where the `browser` API proposal is declared but not granted (e.g. 1.130 stable, which strips non-allowlisted `enabledApiProposals` from Marketplace installs). Newer VS Code exposes the ungranted members as stubs that throw on access, so the old `typeof vscode.window.openBrowserTab` feature-detection false-positived and the startup event wiring then threw `CANNOT use API proposal: browser`, taking the whole bridge down (#7). Detection now probes an actual property access and treats any throw as "not available", and the startup wiring additionally downgrades to the debug-session fallback path on failure instead of failing to start.
