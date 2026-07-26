@@ -45,7 +45,10 @@ export function isEnforcementEnabled(): boolean {
 export function normalizeUrl(url: string): string {
 	try {
 		const u = new URL(url);
-		return u.origin.toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search;
+		// protocol+host, NOT u.origin: origin collapses to "null" for opaque
+		// schemes (chrome://, chrome-extension://, about:), discarding the host
+		// so distinct pages would share a key. host preserves it.
+		return (u.protocol + '//' + u.host).toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search;
 	} catch {
 		return url.replace(/#.*$/, '').replace(/\/+$/, '');
 	}

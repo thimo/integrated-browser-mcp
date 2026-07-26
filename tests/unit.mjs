@@ -84,6 +84,8 @@ const section = name => console.log(`\n${name}`);
 	// and two distinct opaque-origin (file:) urls that both compared as "null".
 	eq('keeps a same-origin url with a real path', strip('Careers (https://x.com/jobs)', 'https://x.com/home'), 'Careers (https://x.com/jobs)');
 	eq('keeps a foreign file url on a file page', strip('Report (file:///b.html)', 'file:///a.html'), 'Report (file:///b.html)');
+	// Tolerates a non-normalized composed origin (explicit default port).
+	eq('tolerates a default port in the composed origin', strip('Local (http://localhost:80/)', 'http://localhost/app'), 'Local');
 }
 
 // ---------------------------------------------------------------- lm-pages
@@ -302,6 +304,8 @@ const section = name => console.log(`\n${name}`);
 	eq('drops the fragment', norm('https://x.com/a#section'), norm('https://x.com/a'));
 	eq('drops a trailing slash', norm('https://x.com/a/'), norm('https://x.com/a'));
 	eq('preserves the query', norm('https://x.com/a?b=1'), 'https://x.com/a?b=1');
+	// Opaque-origin schemes must keep their host (u.origin would collapse to "null").
+	eq('keeps opaque-scheme host distinct', norm('chrome://settings/') !== norm('chrome://extensions/'), true);
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

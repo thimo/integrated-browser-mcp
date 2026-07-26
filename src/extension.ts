@@ -22,10 +22,13 @@ let running = false;
 let instanceFile: string | null = null;
 let actualEndpoint: { socketPath?: string; port?: number } = {};
 let browserLaunching = false;
-// Subscriptions created per start (browser-tab listeners, the MCP provider).
+// Subscriptions created per start (the browser-tab lifecycle listeners).
 // Disposed by stopBridge so a stopped bridge stops firing handlers that deref
 // the now-null `cdp`, and so start->stop->start does not accumulate duplicates.
 let startDisposables: vscode.Disposable[] = [];
+// Fired after the bundled MCP server file is synced, so the VS Code MCP provider
+// (registered at activation) re-resolves once the file exists.
+let mcpDidChange: vscode.EventEmitter<void> | null = null;
 
 function isBrowserSession(session: vscode.DebugSession): boolean {
 	return session.type === 'pwa-editor-browser'
@@ -174,6 +177,9 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		// which it picks up the previous one — which matters now that the
 		// transport can change between builds.
 		await syncMcpServer(context);
+		// The server file now exists; tell VS Code's MCP provider to re-resolve
+		// (it was registered at activation, possibly before this sync).
+		mcpDidChange?.fire();
 
 		// 1. Clean up stale instance files from dead processes
 		await cleanStaleInstances();
@@ -326,13 +332,14 @@ async function stopBridge(): Promise<void> {
 	}
 	startDisposables = [];
 	// Stop accepting requests before tearing down CDP, so no request runs against
-	// a half-disposed manager.
-	await httpServer?.stop();
-	await cdp?.dispose();
+	// a half-disposed manager. Guard each await so a failure in one step can't
+	// leave the other resource un-torn-down (and cdp non-null).
+	try { await httpServer?.stop(); } catch (err) { log?.appendLine(`[Bridge] httpServer.stop failed: ${err}`); }
+	try { await cdp?.dispose(); } catch (err) { log?.appendLine(`[Bridge] cdp.dispose failed: ${err}`); }
 	// Null it out: the contributed LM tools hold a getter for this and would
 	// otherwise keep reading a disposed CDPManager after a stop.
 	cdp = undefined as unknown as CDPManager;
-	await unregisterInstance();
+	await unregisterInstance().catch(() => undefined);
 	statusBar?.update('disconnected', false, null, { count: 0 });
 	log?.appendLine('[Bridge] Stopped');
 }
@@ -441,10 +448,18 @@ function registerMcpProvider(context: vscode.ExtensionContext): void {
 	const lm = vscode.lm as unknown as { registerMcpServerDefinitionProvider?: unknown };
 	if (typeof lm.registerMcpServerDefinitionProvider !== 'function') return;
 	try {
+		// Registered at activation, but STABLE_SERVER is written by syncMcpServer
+		// during startBridge (which may run later, or not at all with
+		// autoStart:false). Fire this after the sync so VS Code re-resolves the
+		// definition once the server file actually exists, instead of caching a
+		// missing path.
+		mcpDidChange = new vscode.EventEmitter<void>();
 		// Requires the matching contributes.mcpServerDefinitionProviders entry in
 		// package.json (id 'integratedBrowserMcp'); without it this call throws.
 		context.subscriptions.push(
+			mcpDidChange,
 			vscode.lm.registerMcpServerDefinitionProvider('integratedBrowserMcp', {
+				onDidChangeMcpServerDefinitions: mcpDidChange.event,
 				provideMcpServerDefinitions: () => [
 					new vscode.McpStdioServerDefinition('Integrated Browser', 'node', [STABLE_SERVER]),
 				],

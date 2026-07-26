@@ -649,6 +649,8 @@ export class BridgeServer {
 					}
 				}
 
+				// Reject empty input before sleeping, so a misuse doesn't wait waitMs first.
+				if (!points.length && !req.body?.selector) { res.json({ ok: false, error: 'Provide `selector`, or `points` as [{x, y}] in page coordinates.' }); return; }
 				if (points.length > 32) { res.json({ ok: false, error: 'At most 32 points per call.' }); return; }
 
 				// Wait BEFORE measuring: waitMs exists for mid-transition pages, so
@@ -676,7 +678,8 @@ export class BridgeServer {
 					points.push({ x: value.x, y: value.y, from: req.body.selector });
 				}
 
-				if (!points.length) { res.json({ ok: false, error: 'Provide `selector`, or `points` as [{x, y}] in page coordinates.' }); return; }
+				// Re-check after the selector push so `points` + selector can't exceed the cap.
+				if (points.length > 32) { res.json({ ok: false, error: 'At most 32 points per call.' }); return; }
 
 				const samples = [];
 				for (const point of points) {

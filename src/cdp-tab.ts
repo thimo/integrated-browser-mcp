@@ -101,9 +101,14 @@ export function stripComposedLabel(label: string, url: string): string {
 	if (!url) return label;
 	try {
 		const page = new URL(url);
-		// VS Code composes exactly "(origin/)". Strip only that — never a suffix
-		// carrying a real path/query/fragment.
-		if (suffix === page.origin + '/' || suffix === page.origin || suffix === url) return title;
+		const suf = new URL(suffix);
+		// Strip only when the parenthetical is this page's origin ROOT (no
+		// meaningful path/query/fragment). Compare parsed origins so a
+		// non-normalized composition (explicit default port, uppercase host)
+		// still matches, but a real path like "(https://x/jobs)" does not.
+		if (suf.origin === page.origin && (suf.pathname === '/' || suf.pathname === '') && !suf.search && !suf.hash) return title;
+		// Exact echo (about:blank and other opaque cases the origin test can't compare).
+		if (suffix === url) return title;
 	} catch {
 		// Unparseable — keep the label rather than guess.
 	}
