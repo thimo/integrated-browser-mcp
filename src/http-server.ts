@@ -647,6 +647,13 @@ export class BridgeServer {
 					}
 				}
 
+				if (points.length > 32) { res.json({ ok: false, error: 'At most 32 points per call.' }); return; }
+
+				// Wait BEFORE measuring: waitMs exists for mid-transition pages, so
+				// the selector's coordinates must be read from settled layout.
+				const waitMs = Math.min(10000, Math.max(0, Number(req.body?.waitMs) || 0));
+				if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+
 				// A selector is usually what the caller actually means: sample the
 				// centre of this element. Page coordinates, so scroll is included.
 				if (req.body?.selector) {
@@ -663,26 +670,29 @@ export class BridgeServer {
 					const value = probe?.result?.value;
 					if (!value) { res.json({ ok: false, error: `No element matches selector: ${req.body.selector}` }); return; }
 					if (value.empty) { res.json({ ok: false, error: `Element has zero size: ${req.body.selector}` }); return; }
+					if (!Number.isFinite(value.x) || !Number.isFinite(value.y)) { res.json({ ok: false, error: `Element has non-finite coordinates: ${req.body.selector}` }); return; }
 					points.push({ x: value.x, y: value.y, from: req.body.selector });
 				}
 
 				if (!points.length) { res.json({ ok: false, error: 'Provide `selector`, or `points` as [{x, y}] in page coordinates.' }); return; }
-				if (points.length > 32) { res.json({ ok: false, error: 'At most 32 points per call.' }); return; }
 
-				const waitMs = Math.min(10000, Math.max(0, Number(req.body?.waitMs) || 0));
-				if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-
-				// One 1x1 capture per point rather than one big capture plus
-				// coordinate maths: it sidesteps device-pixel-ratio scaling
-				// entirely, since the clip is expressed in CSS pixels.
 				const samples = [];
 				for (const point of points) {
+					// captureBeyondViewport so a page-coordinate clip outside the
+					// current viewport is honoured (matches /screenshot); without it
+					// a scrolled element samples the wrong pixel.
 					const shot = await tab.send('Page.captureScreenshot', {
 						format: 'png',
+						captureBeyondViewport: true,
 						clip: { x: point.x, y: point.y, width: 1, height: 1, scale: 1 },
 					}) as { data: string };
 					const image = decodePng(Buffer.from(shot.data, 'base64'));
-					samples.push({ ...pixelAt(image, 0, 0), x: point.x, y: point.y, ...(point.from ? { selector: point.from } : {}) });
+					// Sample the image centre: with deviceScaleFactor>1 the 1 CSS-px
+					// clip decodes to N*N device pixels, and the corner (0,0) is an
+					// edge subpixel.
+					const cx = (image.width - 1) / 2;
+					const cy = (image.height - 1) / 2;
+					samples.push({ ...pixelAt(image, cx, cy), x: point.x, y: point.y, ...(point.from ? { selector: point.from } : {}) });
 				}
 				res.json({
 					ok: true,

@@ -31,11 +31,16 @@ export interface Pixel {
 	g: number;
 	b: number;
 	a: number;
-	/** `#rrggbb`, the form a caller can compare against CSS. */
+	/** `#rrggbb` (RGB only) — compare against CSS; read `a` for transparency. */
 	hex: string;
 }
 
 const PNG_SIGNATURE = 0x89504e47;
+const PNG_SIGNATURE_TAIL = 0x0d0a1a0a;
+// Sanity cap on decoded size. decodePng is only fed Chromium's own screenshot
+// PNGs (1x1 for /pixel), but the function is exported: bound the allocation and
+// the inflate so a crafted header/stream can't request gigabytes or zip-bomb.
+const MAX_PIXELS = 100_000_000;
 
 function paeth(a: number, b: number, c: number): number {
 	const p = a + b - c;
@@ -76,10 +81,11 @@ function unfilter(type: number, cur: Buffer, prev: Buffer, bpp: number): void {
 }
 
 export function decodePng(buffer: Buffer): DecodedImage {
-	if (buffer.length < 8 || buffer.readUInt32BE(0) !== PNG_SIGNATURE) {
+	if (buffer.length < 8 || buffer.readUInt32BE(0) !== PNG_SIGNATURE || buffer.readUInt32BE(4) !== PNG_SIGNATURE_TAIL) {
 		throw new Error('Not a PNG');
 	}
 
+	let sawIhdr = false;
 	let width = 0;
 	let height = 0;
 	let bitDepth = 0;
@@ -96,6 +102,8 @@ export function decodePng(buffer: Buffer): DecodedImage {
 		pos += 12 + length;
 
 		if (type === 'IHDR') {
+			if (data.length < 13) throw new Error('PNG IHDR truncated');
+			sawIhdr = true;
 			width = data.readUInt32BE(0);
 			height = data.readUInt32BE(4);
 			bitDepth = data[8];
@@ -108,14 +116,21 @@ export function decodePng(buffer: Buffer): DecodedImage {
 		}
 	}
 
+	if (!sawIhdr) throw new Error('PNG has no IHDR');
+	if (width <= 0 || height <= 0) throw new Error(`Invalid PNG dimensions ${width}x${height}`);
+	if (width * height > MAX_PIXELS) throw new Error(`PNG too large (${width}x${height})`);
 	if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth ${bitDepth} (expected 8)`);
 	if (interlace !== 0) throw new Error('Interlaced PNG is not supported');
 	const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
 	if (!channels) throw new Error(`Unsupported PNG colour type ${colorType} (expected 2 or 6)`);
 	if (!idat.length) throw new Error('PNG contains no image data');
 
-	const raw = zlib.inflateSync(Buffer.concat(idat));
 	const stride = width * channels;
+	const expected = (stride + 1) * height;
+	// maxOutputLength bounds a zip-bomb IDAT; the length check below catches a
+	// stream that inflates short (which would otherwise zero-fill silently).
+	const raw = zlib.inflateSync(Buffer.concat(idat), { maxOutputLength: expected });
+	if (raw.length < expected) throw new Error('PNG image data truncated');
 	const out = Buffer.alloc(stride * height);
 	let prev = Buffer.alloc(stride);
 
@@ -132,13 +147,20 @@ export function decodePng(buffer: Buffer): DecodedImage {
 }
 
 export function pixelAt(image: DecodedImage, x: number, y: number): Pixel {
-	const px = Math.max(0, Math.min(image.width - 1, Math.round(x)));
-	const py = Math.max(0, Math.min(image.height - 1, Math.round(y)));
+	if (!image.width || !image.height || image.data.length === 0) {
+		throw new Error('Cannot sample an empty image');
+	}
+	const fx = Number.isFinite(x) ? x : 0;
+	const fy = Number.isFinite(y) ? y : 0;
+	const px = Math.max(0, Math.min(image.width - 1, Math.round(fx)));
+	const py = Math.max(0, Math.min(image.height - 1, Math.round(fy)));
 	const offset = (py * image.width + px) * image.channels;
 	const r = image.data[offset];
 	const g = image.data[offset + 1];
 	const b = image.data[offset + 2];
 	const a = image.channels === 4 ? image.data[offset + 3] : 255;
+	// hex is RGB only; a caller asserting a colour over a possibly-transparent
+	// region must also check `a` (a fully transparent pixel still has an RGB).
 	const hex = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
 	return { r, g, b, a, hex };
 }

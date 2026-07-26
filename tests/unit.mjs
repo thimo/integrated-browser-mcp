@@ -253,6 +253,39 @@ const section = name => console.log(`\n${name}`);
 	});
 	eq('filter 2 (Up)', pixelAt(decodePng(up), 0, 1), { r: 0, g: 0, b: 255, a: 255, hex: '#0000ff' });
 
+	// Average and Paeth are what Chromium emits most; a single-row image keeps
+	// the previous row zero so the encoder just inverts the decoder's maths.
+	const row2 = [[10, 20, 30, 40], [200, 100, 50, 255]];
+	const avg = makePng(2, 1, row2, raw => {
+		const out = Buffer.from(raw);
+		for (let i = 0; i < raw.length; i++) { const left = i >= 4 ? raw[i - 4] : 0; out[i] = (raw[i] - (left >> 1)) & 0xff; }
+		return Buffer.concat([Buffer.from([3]), out]);
+	});
+	eq('filter 3 (Average)', pixelAt(decodePng(avg), 1, 0), { r: 200, g: 100, b: 50, a: 255, hex: '#c86432' });
+
+	const pae = makePng(2, 1, row2, raw => {
+		const out = Buffer.from(raw);
+		for (let i = 4; i < raw.length; i++) out[i] = (raw[i] - raw[i - 4]) & 0xff;
+		return Buffer.concat([Buffer.from([4]), out]);
+	});
+	eq('filter 4 (Paeth)', pixelAt(decodePng(pae), 1, 0), { r: 200, g: 100, b: 50, a: 255, hex: '#c86432' });
+
+	// RGB (colour type 2, 3 channels): alpha must default to 255.
+	const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	const rgbIhdr = Buffer.alloc(13); rgbIhdr.writeUInt32BE(1, 0); rgbIhdr.writeUInt32BE(1, 4); rgbIhdr[8] = 8; rgbIhdr[9] = 2;
+	const rgbPng = Buffer.concat([sig, chunk('IHDR', rgbIhdr), chunk('IDAT', zlib.deflateSync(Buffer.from([0, 10, 20, 30]))), chunk('IEND', Buffer.alloc(0))]);
+	eq('RGB colour type defaults alpha to 255', pixelAt(decodePng(rgbPng), 0, 0), { r: 10, g: 20, b: 30, a: 255, hex: '#0a141e' });
+
+	// A stream that inflates short must throw, not silently zero-fill.
+	const shortIhdr = Buffer.alloc(13); shortIhdr.writeUInt32BE(2, 0); shortIhdr.writeUInt32BE(2, 4); shortIhdr[8] = 8; shortIhdr[9] = 6;
+	const shortPng = Buffer.concat([sig, chunk('IHDR', shortIhdr), chunk('IDAT', zlib.deflateSync(Buffer.alloc(9))), chunk('IEND', Buffer.alloc(0))]);
+	throws('rejects truncated image data', () => decodePng(shortPng));
+
+	// A crafted oversized header must be rejected before allocating gigabytes.
+	const bigIhdr = Buffer.alloc(13); bigIhdr.writeUInt32BE(40000, 0); bigIhdr.writeUInt32BE(40000, 4); bigIhdr[8] = 8; bigIhdr[9] = 6;
+	const bigPng = Buffer.concat([sig, chunk('IHDR', bigIhdr), chunk('IDAT', zlib.deflateSync(Buffer.alloc(4))), chunk('IEND', Buffer.alloc(0))]);
+	throws('rejects an oversized header', () => decodePng(bigPng));
+
 	throws('rejects a non-PNG', () => decodePng(Buffer.from('definitely not a png')));
 }
 
