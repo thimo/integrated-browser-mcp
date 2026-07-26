@@ -404,6 +404,9 @@ export class CDPManager {
 	 */
 	private revoked = new Map<string, { url: string; reason: string; at: number }>();
 
+	/** Cap on remembered revocations, so enforceSharing churn can't grow the map without bound. */
+	private static readonly MAX_REVOKED = 100;
+
 	revokedReason(tabId: string): string | undefined {
 		return this.revoked.get(tabId)?.reason;
 	}
@@ -426,6 +429,13 @@ export class CDPManager {
 			this._activeTabId = this.tabs.size > 0 ? this.tabs.keys().next().value ?? null : null;
 		}
 		this.revoked.set(tabId, { url, reason, at: Date.now() });
+		// FIFO-evict the oldest so a long session under enforceSharing (every
+		// user tab adopted then revoked) can't grow this without bound.
+		while (this.revoked.size > CDPManager.MAX_REVOKED) {
+			const oldest = this.revoked.keys().next().value;
+			if (oldest === undefined) break;
+			this.revoked.delete(oldest);
+		}
 		this.emitStateChange();
 	}
 

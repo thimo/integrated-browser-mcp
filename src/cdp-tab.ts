@@ -1154,5 +1154,6 @@ export class CDPTab {
 		this.disposed = true;
 		this.disconnect();
 		this._onStateChange.dispose();
+		this._onTabStateChange.dispose();
 	}
 }

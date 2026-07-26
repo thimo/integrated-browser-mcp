@@ -22,6 +22,10 @@ let running = false;
 let instanceFile: string | null = null;
 let actualEndpoint: { socketPath?: string; port?: number } = {};
 let browserLaunching = false;
+// Subscriptions created per start (browser-tab listeners, the MCP provider).
+// Disposed by stopBridge so a stopped bridge stops firing handlers that deref
+// the now-null `cdp`, and so start->stop->start does not accumulate duplicates.
+let startDisposables: vscode.Disposable[] = [];
 
 function isBrowserSession(session: vscode.DebugSession): boolean {
 	return session.type === 'pwa-editor-browser'
@@ -187,24 +191,32 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		let proposedApiWired = false;
 		if (hasProposedBrowserApi()) {
 			try {
-				context.subscriptions.push(
+				// Per-start subscriptions: each guards on `cdp` because stopBridge
+				// nulls it, and a browser-tab event can still fire between the null
+				// and dispose() completing. Tracked in startDisposables so stop
+				// removes them (no leak, no post-stop TypeError).
+				startDisposables.push(
 					vscode.window.onDidOpenBrowserTab(tab => {
+						if (!cdp) return;
 						// Ignore tabs we're about to open ourselves; adoptBrowserTab is idempotent.
 						cdp.adoptBrowserTab(tab).catch(err => {
 							log.appendLine(`[Bridge] adoptBrowserTab failed: ${err}`);
 						});
 					}),
 					vscode.window.onDidCloseBrowserTab(tab => {
+						if (!cdp) return;
 						cdp.untrackBrowserTab(tab);
 						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
 					}),
 					vscode.window.onDidChangeActiveBrowserTab(tab => {
+						if (!cdp) return;
 						cdp.syncActive(tab);
 						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
 					}),
 					// url/title/icon changes arrive as a push, so navigation
 					// settling needs no polling and no extra CDP round-trip.
 					vscode.window.onDidChangeBrowserTabState(tab => {
+						if (!cdp) return;
 						cdp.notifyBrowserTabState(tab);
 						statusBar.update(cdp.state, running, cdp.transport, summarizeTabs());
 					}),
@@ -238,7 +250,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		// 6. Configure Claude (server already synced above), and offer the same
 		//    server to VS Code-hosted MCP clients through the official API so
 		//    they do not depend on us editing another tool's config file.
-		registerMcpProvider(context);
+		registerMcpProvider();
 		await configureClaude();
 
 		log.appendLine(`[Bridge] Started successfully on ${actualEndpoint.socketPath ?? `port ${actualEndpoint.port}`}`);
@@ -303,11 +315,19 @@ function summarizeTabs(): { count: number; activeUrl?: string } {
 async function stopBridge(): Promise<void> {
 	running = false;
 	actualEndpoint = {};
+	// Dispose per-start subscriptions first: they deref `cdp`, so they must stop
+	// firing before it is torn down and nulled.
+	for (const d of startDisposables) {
+		try { d.dispose(); } catch { /* already disposed */ }
+	}
+	startDisposables = [];
+	// Stop accepting requests before tearing down CDP, so no request runs against
+	// a half-disposed manager.
+	await httpServer?.stop();
 	await cdp?.dispose();
 	// Null it out: the contributed LM tools hold a getter for this and would
 	// otherwise keep reading a disposed CDPManager after a stop.
 	cdp = undefined as unknown as CDPManager;
-	await httpServer?.stop();
 	await unregisterInstance();
 	statusBar?.update('disconnected', false, null, { count: 0 });
 	log?.appendLine('[Bridge] Stopped');
@@ -413,11 +433,14 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
  * Feature-detected: the API is stable in 1.101+ but this extension supports
  * older builds.
  */
-function registerMcpProvider(context: vscode.ExtensionContext): void {
+function registerMcpProvider(): void {
 	const lm = vscode.lm as unknown as { registerMcpServerDefinitionProvider?: unknown };
 	if (typeof lm.registerMcpServerDefinitionProvider !== 'function') return;
 	try {
-		context.subscriptions.push(
+		// Per-start (not context.subscriptions): a second registration under the
+		// same id on stop->start throws "already registered", and the provider
+		// should not outlive the bridge it points at.
+		startDisposables.push(
 			vscode.lm.registerMcpServerDefinitionProvider('integratedBrowserMcp', {
 				provideMcpServerDefinitions: () => [
 					new vscode.McpStdioServerDefinition('Integrated Browser', 'node', [STABLE_SERVER]),
