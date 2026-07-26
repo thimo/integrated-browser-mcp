@@ -81,10 +81,25 @@
     "configuration": {
       "title": "Browser Bridge",
       "properties": {
+        "browserBridge.transport": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "socket",
+            "tcp"
+          ],
+          "enumDescriptions": [
+            "Prefer a unix socket / named pipe; fall back to a TCP port if one cannot be created",
+            "Require a unix socket / named pipe; fail startup rather than open a port",
+            "Always listen on a TCP port (needed only when the MCP client cannot reach this machine's filesystem)"
+          ],
+          "description": "How external agents reach the bridge. The default avoids opening any listening port: it binds a unix socket (or named pipe on Windows) that no other machine can reach and no port scan can find. TCP remains available for setups where the MCP client and the extension host do not share a filesystem."
+        },
         "browserBridge.httpPort": {
           "type": "number",
           "default": 3788,
-          "description": "Port for the local HTTP API server"
+          "description": "TCP port used only when browserBridge.transport resolves to tcp. Ignored when listening on a socket/pipe."
         },
         "browserBridge.autoStart": {
           "type": "boolean",

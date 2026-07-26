@@ -19,7 +19,7 @@ let httpServer: BridgeServer;
 let statusBar: StatusBar;
 let running = false;
 let instanceFile: string | null = null;
-let actualPort: number | null = null;
+let actualEndpoint: { socketPath?: string; port?: number } = {};
 let browserLaunching = false;
 
 function isBrowserSession(session: vscode.DebugSession): boolean {
@@ -93,6 +93,41 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 }
 
+/**
+ * Where the bridge's control socket lives. A unix socket on POSIX, a named
+ * pipe on Windows. Keyed by workspace so multiple VS Code windows coexist
+ * without the port-scanning dance TCP required.
+ */
+function socketPathFor(id: string): string {
+	return process.platform === 'win32'
+		? `\\\\.\\pipe\\integrated-browser-mcp-${id}`
+		: path.join(os.tmpdir(), `integrated-browser-mcp-${id}.sock`);
+}
+
+/**
+ * Prefer a socket/pipe (no listening port at all); fall back to TCP when it
+ * cannot be created, or when the user pins `browserBridge.transport` to tcp.
+ * TCP is still needed when the MCP client cannot reach the extension host's
+ * filesystem — though instance discovery already assumes it can.
+ */
+async function listenBest(
+	server: BridgeServer,
+	config: vscode.WorkspaceConfiguration,
+	preferredPort: number,
+): Promise<{ socketPath?: string; port?: number }> {
+	const mode = config.get<string>('transport', 'auto');
+	if (mode !== 'tcp') {
+		try {
+			const socketPath = await server.startOnSocket(socketPathFor(instanceId(getWorkspacePath())));
+			return { socketPath };
+		} catch (err) {
+			if (mode === 'socket') throw err;
+			log.appendLine(`[Bridge] Socket transport unavailable (${err}); falling back to TCP`);
+		}
+	}
+	return { port: await server.start(preferredPort) };
+}
+
 async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 	if (running) {
 		vscode.window.showInformationMessage('Browser MCP is already running.');
@@ -117,10 +152,10 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		cdp = new CDPManager(log);
 		cdp.onStateChange(state => statusBar.update(state, running, cdp.transport, summarizeTabs()));
 
-		// 3. HTTP server (with lazy browser launch callback)
+		// 3. HTTP server (socket-first, TCP fallback)
 		httpServer = new BridgeServer(cdp, log);
 		httpServer.setEnsureBrowser(url => ensureBrowser(url));
-		actualPort = await httpServer.start(preferredPort);
+		actualEndpoint = await listenBest(httpServer, config, preferredPort);
 		running = true;
 		statusBar.update(cdp.state, true, cdp.transport, summarizeTabs());
 
@@ -178,7 +213,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		}
 
 		// 5. Register this instance for MCP discovery
-		await registerInstance(actualPort);
+		await registerInstance(actualEndpoint);
 
 		// 6. Configure Claude (server already synced above), and offer the same
 		//    server to VS Code-hosted MCP clients through the official API so
@@ -186,7 +221,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		registerMcpProvider(context);
 		await configureClaude();
 
-		log.appendLine(`[Bridge] Started successfully on port ${actualPort}`);
+		log.appendLine(`[Bridge] Started successfully on ${actualEndpoint.socketPath ?? `port ${actualEndpoint.port}`}`);
 	} catch (err) {
 		log.appendLine(`[Bridge] Failed to start: ${err}`);
 		vscode.window.showErrorMessage(`Browser MCP failed to start: ${err}`);
@@ -247,7 +282,7 @@ function summarizeTabs(): { count: number; activeUrl?: string } {
 
 async function stopBridge(): Promise<void> {
 	running = false;
-	actualPort = null;
+	actualEndpoint = {};
 	await cdp?.dispose();
 	// Null it out: the contributed LM tools hold a getter for this and would
 	// otherwise keep reading a disposed CDPManager after a stop.
@@ -402,11 +437,11 @@ async function cleanStaleInstances(): Promise<void> {
 	}
 }
 
-async function registerInstance(port: number): Promise<void> {
+async function registerInstance(endpoint: { socketPath?: string; port?: number }): Promise<void> {
 	const workspace = getWorkspacePath();
 	const id = instanceId(workspace);
 	const data = {
-		port,
+		...endpoint,
 		workspace,
 		pid: process.pid,
 		startedAt: new Date().toISOString(),
@@ -527,11 +562,11 @@ function showStatus(): void {
 	const cdpState = cdp?.state ?? 'disconnected';
 	const transport = cdp?.transport ?? 'none';
 	const serverState = running ? 'running' : 'stopped';
-	const port = actualPort ?? 'none';
+	const endpoint = actualEndpoint.socketPath ?? actualEndpoint.port ?? 'none';
 	const tabs = cdp?.tabCount ?? 0;
 
 	vscode.window.showInformationMessage(
-		`Browser MCP: CDP ${cdpState} (${transport}), HTTP on ${port} (${serverState}), ${tabs} tab(s)`,
+		`Browser MCP: CDP ${cdpState} (${transport}), API on ${endpoint} (${serverState}), ${tabs} tab(s)`,
 	);
 }
 
