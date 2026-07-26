@@ -69,10 +69,6 @@ function discoverInstance(): Instance | null {
 	return null;
 }
 
-function discoverPort(): number | null {
-	return discoverInstance()?.port ?? null;
-}
-
 /**
  * Resolve how to reach the bridge. A unix socket / named pipe is preferred
  * (no listening port at all); TCP remains for instances that could not create
@@ -92,14 +88,21 @@ function resolveEndpoints(): Array<{ socketPath?: string; port?: number }> {
 		return [{ socketPath: process.env.BROWSER_BRIDGE_SOCKET }];
 	}
 	const inst = discoverInstance();
-	const candidates: Array<{ socketPath?: string; port?: number }> = [];
-	if (inst?.socketPath) candidates.push({ socketPath: inst.socketPath });
-	if (inst?.port) candidates.push({ port: inst.port });
-	// Last resort — the lowest port the extension tries to bind. Keeps a
-	// version-skewed pair working: an extension on TCP with a socket-aware
-	// client, or vice versa, still finds each other instead of hard-failing.
-	candidates.push({ port: 3788 });
-	return candidates;
+	if (inst) {
+		// A discovered instance is authoritative: try exactly what it published
+		// and let a failure surface. Appending the default port here would let a
+		// transient socket error silently reroute to whatever listens on 3788,
+		// which in a multi-window setup is a *different workspace's* bridge.
+		// Driving the wrong window without knowing is worse than failing.
+		const candidates: Array<{ socketPath?: string; port?: number }> = [];
+		if (inst.socketPath) candidates.push({ socketPath: inst.socketPath });
+		if (inst.port) candidates.push({ port: inst.port });
+		if (candidates.length) return candidates;
+	}
+	// Nothing discovered: fall back to the lowest port the extension binds, which
+	// also covers the version-skew case where an older extension is on TCP and
+	// never wrote a socket path.
+	return [{ port: 3788 }];
 }
 
 /**
@@ -167,7 +170,7 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 const SERVER_INSTRUCTIONS = `
 This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
 
-Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (That number is only shown in the VS Code tab title when \`browserBridge.tabTitlePrefix\` is enabled — it is off by default because it rewrites the page's real \`document.title\`.)
+Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (The number also appears in the tab title for tabs the bridge opened, per \`browserBridge.tabIndicator\`; tabs the user opened are never marked.)
 
 If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs. In that mode discovery text from VS Code will claim shared pages "can be interacted with"; that is VS Code's copy and is not true here.
 

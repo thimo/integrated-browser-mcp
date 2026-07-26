@@ -12,6 +12,7 @@ const MCP_KEY = 'integrated-browser-mcp';
 const STABLE_DIR = path.join(os.homedir(), '.integrated-browser-mcp');
 const STABLE_SERVER = path.join(STABLE_DIR, 'mcp-server.mjs');
 const INSTANCES_DIR = path.join(STABLE_DIR, 'instances');
+const SOCKETS_DIR = path.join(STABLE_DIR, 'sockets');
 
 let log: vscode.OutputChannel;
 let cdp: CDPManager;
@@ -99,9 +100,27 @@ export function activate(context: vscode.ExtensionContext) {
  * without the port-scanning dance TCP required.
  */
 function socketPathFor(id: string): string {
-	return process.platform === 'win32'
-		? `\\\\.\\pipe\\integrated-browser-mcp-${id}`
-		: path.join(os.tmpdir(), `integrated-browser-mcp-${id}.sock`);
+	if (process.platform === 'win32') {
+		// Named pipes are not filesystem objects; the namespace is not
+		// world-writable and there is no directory to protect.
+		return `\\\\.\\pipe\\integrated-browser-mcp-${id}`;
+	}
+	// Deliberately not os.tmpdir(): it is world-writable with a predictable
+	// name, so another local user could pre-create the path (denial of
+	// service, or worse if they create it as a socket and accept on it).
+	// SOCKETS_DIR is created 0700 before any bind, which also closes the
+	// window between listen() and chmod where the socket sat at default
+	// permissions.
+	return path.join(SOCKETS_DIR, `${id}.sock`);
+}
+
+/** Create the socket directory owner-only before anything binds inside it. */
+async function ensureSocketsDir(): Promise<void> {
+	if (process.platform === 'win32') return;
+	await fs.promises.mkdir(SOCKETS_DIR, { recursive: true, mode: 0o700 });
+	// mkdir's mode is masked by umask, and the directory may predate this
+	// version, so assert the mode rather than assume it.
+	await fs.promises.chmod(SOCKETS_DIR, 0o700).catch(() => undefined);
 }
 
 /**
@@ -118,6 +137,7 @@ async function listenBest(
 	const mode = config.get<string>('transport', 'auto');
 	if (mode !== 'tcp') {
 		try {
+			await ensureSocketsDir();
 			const socketPath = await server.startOnSocket(socketPathFor(instanceId(getWorkspacePath())));
 			return { socketPath };
 		} catch (err) {

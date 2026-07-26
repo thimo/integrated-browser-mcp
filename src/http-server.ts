@@ -1115,7 +1115,10 @@ export class BridgeServer {
 			});
 			server.once('error', err => { server.close(); reject(err); });
 		});
-		// Named pipes are not filesystem objects and have no mode to set.
+		// Defence in depth: the owner-only parent directory is what actually
+		// prevents another local user reaching this, since there is an
+		// unavoidable window between bind and chmod. Named pipes are not
+		// filesystem objects and have no mode to set.
 		if (process.platform !== 'win32') {
 			try { fs.chmodSync(socketPath, 0o600); } catch { /* best effort */ }
 		}
