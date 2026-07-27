@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
+import * as net from 'net';
 import * as crypto from 'crypto';
 import { CDPManager, hasProposedBrowserApi } from './cdp';
 import { BridgeServer } from './http-server';
@@ -42,9 +43,24 @@ function getWorkspacePath(): string {
 }
 
 function instanceId(workspacePath: string): string {
-	// Use PID as fallback when no workspace folder is open to avoid collisions
-	const key = workspacePath || `pid-${process.pid}`;
+	// Include the pid so two windows on the SAME workspace get distinct socket
+	// paths and instance files. Without it they collide: the second window can't
+	// bind the shared socket, falls back to TCP, and its instance file overwrites
+	// the first's, stranding it. Discovery matches on the `workspace` field
+	// inside the file (not the id), so per-pid ids don't break it.
+	const key = `${workspacePath || 'no-workspace'}:${process.pid}`;
 	return crypto.createHash('md5').update(key).digest('hex').slice(0, 12);
+}
+
+/** True when something is actively accepting on this socket path (don't unlink a live one). */
+function socketIsLive(socketPath: string): Promise<boolean> {
+	return new Promise(resolve => {
+		const socket = net.connect(socketPath);
+		const timer = setTimeout(() => done(false), 300);
+		const done = (live: boolean): void => { clearTimeout(timer); socket.destroy(); resolve(live); };
+		socket.once('connect', () => done(true));
+		socket.once('error', () => done(false));
+	});
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -472,6 +488,8 @@ function registerMcpProvider(context: vscode.ExtensionContext): void {
 }
 
 async function cleanStaleInstances(): Promise<void> {
+	// Socket paths still referenced by a LIVE instance file — never sweep these.
+	const liveSockets = new Set<string>();
 	try {
 		await fs.promises.mkdir(INSTANCES_DIR, { recursive: true });
 		const files = await fs.promises.readdir(INSTANCES_DIR);
@@ -480,21 +498,40 @@ async function cleanStaleInstances(): Promise<void> {
 			const filePath = path.join(INSTANCES_DIR, file);
 			try {
 				const data = JSON.parse(await fs.promises.readFile(filePath, 'utf-8'));
-				// Check if the process is still alive
-				try {
-					process.kill(data.pid, 0); // signal 0 = just check existence
-				} catch {
-					// Process is dead, remove stale file
-					await fs.promises.unlink(filePath);
+				let alive = true;
+				try { process.kill(data.pid, 0); } catch { alive = false; } // signal 0 = existence check
+				if (alive) {
+					if (typeof data.socketPath === 'string') liveSockets.add(data.socketPath);
+				} else {
+					// Process is dead: remove the file and its socket.
+					await fs.promises.unlink(filePath).catch(() => undefined);
+					if (typeof data.socketPath === 'string') await fs.promises.unlink(data.socketPath).catch(() => undefined);
 					log.appendLine(`[Bridge] Cleaned stale instance: ${file}`);
 				}
 			} catch {
-				// Corrupt file, remove it
-				await fs.promises.unlink(filePath);
+				await fs.promises.unlink(filePath).catch(() => undefined); // corrupt file
 			}
 		}
 	} catch {
 		// Instances dir doesn't exist yet
+	}
+
+	// Sweep orphan sockets: a crashed process (Node only unlinks on graceful
+	// close) or a clobbered instance file can leave a `.sock` with no live owner.
+	// Probe before unlinking so a just-bound socket whose instance file isn't
+	// written yet (startup race with another window) is left alone.
+	if (process.platform === 'win32') return;
+	try {
+		const socks = await fs.promises.readdir(SOCKETS_DIR);
+		for (const s of socks) {
+			if (!s.endsWith('.sock')) continue;
+			const p = path.join(SOCKETS_DIR, s);
+			if (liveSockets.has(p) || await socketIsLive(p)) continue;
+			await fs.promises.unlink(p).catch(() => undefined);
+			log.appendLine(`[Bridge] Cleaned orphan socket: ${s}`);
+		}
+	} catch {
+		// Sockets dir doesn't exist yet
 	}
 }
 
