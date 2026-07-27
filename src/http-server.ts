@@ -7,7 +7,7 @@ import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
 import { discoverPages, isDiscoveryAvailable, isDiscoveryEnabled, type DiscoveredPage } from './lm-pages';
 import { hasProposedBrowserApi } from './cdp';
-import { isEnforcementEnabled, normalizeUrl, sharedUrls, enforceSharing as runEnforceSharing } from './sharing';
+import { isEnforcementEnabled, normalizeUrl, enforceSharing as runEnforceSharing } from './sharing';
 import { decodePng, pixelAt } from './png';
 
 const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'allowAndName', 'deny', 'default']);
@@ -245,43 +245,19 @@ export class BridgeServer {
 		return runEnforceSharing(this.cdp, this.log);
 	}
 
-	/**
-	 * Report whether unsharing actually revokes access, without overstating it.
-	 * Enforcement is opt-in *and* depends on a signal that may be absent, so
-	 * "enforced" means both conditions hold — never just the setting.
-	 */
-	private async sharingStatus(): Promise<Record<string, unknown>> {
-		const enabled = isEnforcementEnabled();
-		if (!enabled) {
+	/** Report the access model plainly, without overstating what it guarantees. */
+	private sharingStatus(): Record<string, unknown> {
+		if (!isEnforcementEnabled()) {
 			return {
 				enforced: false,
 				mode: 'off',
-				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Browser Bridge: Stop). Set browserBridge.enforceSharing to make unsharing revoke.',
+				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Browser Bridge: Stop). Set browserBridge.enforceSharing to restrict the bridge to tabs it opened itself.',
 			};
 		}
-		const { available, failed } = await sharedUrls(this.log);
-		if (available) {
-			return {
-				enforced: true,
-				mode: 'enforcing',
-				note: 'browserBridge.enforceSharing is on: the bridge drives only tabs it opened itself plus pages VS Code reports as shared. Unsharing detaches within ~2s and later calls on that tabId fail. Matching is by URL origin+path, so two tabs on the same URL are indistinguishable.',
-			};
-		}
-		if (failed) {
-			return {
-				enforced: true,
-				mode: 'degraded',
-				note: 'browserBridge.enforceSharing is on, but the sharing listing (list_browser_pages) is currently failing, so enforcement is paused (tabs are left as-is rather than mass-revoked). Check the output channel.',
-			};
-		}
-		// Not available and not a transient failure: name the real cause.
-		const cause = !isDiscoveryEnabled()
-			? 'browserBridge.lmPageDiscovery is off, so no sharing signal is read. Turn it on (needs VS Code 1.131+ with chat) to grant access to your existing tabs.'
-			: 'this VS Code build does not expose list_browser_pages (needs 1.131+ with chat enabled), so sharing cannot be expressed.';
 		return {
 			enforced: true,
 			mode: 'bridge-owned-only',
-			note: `browserBridge.enforceSharing is on, but ${cause} The bridge therefore drives ONLY tabs it opened itself; browser_tab_open / browser_navigate create those, so agents still work.`,
+			note: 'browserBridge.enforceSharing is on: the bridge drives ONLY tabs it opened itself; adopted user tabs are detached and later calls on their tabId fail. browser_tab_open / browser_navigate create bridge-owned tabs, so agents still work.',
 		};
 	}
 
@@ -381,7 +357,7 @@ export class BridgeServer {
 					// so explicitly matters because discovery *does* honour
 					// unshare, which makes the system look like it enforces
 					// something it does not.
-					sharing: await this.sharingStatus(),
+					sharing: this.sharingStatus(),
 					transport: this.cdp.transport,
 					// The listening endpoint, so a user/agent can see whether the
 					// bridge is on a socket or fell back to a TCP port (the `auto`

@@ -220,6 +220,6 @@ Caveats:
 
 - The bridge listens on a unix socket / named pipe with owner-only permissions by default — nothing is bound to a network interface, no port to scan, and other local users can't connect. On `browserBridge.transport: "tcp"` it binds `127.0.0.1` only, with no authentication — reachable by any local process, same trust model as VS Code's built-in terminals.
 - `/eval` runs arbitrary JavaScript in the open page — same trust model as the DevTools console. Don't pass untrusted input.
-- VS Code's page-sharing toggle does not govern this bridge by default: it drives every tab it can attach to. The opt-in `browserBridge.enforceSharing` setting makes sharing the access model (needs VS Code 1.131+ with chat enabled plus `browserBridge.lmPageDiscovery`; without that signal the bridge restricts itself to tabs it opened itself).
+- VS Code's page-sharing toggle does not govern this bridge by default: it drives every tab it can attach to. The opt-in `browserBridge.enforceSharing` setting restricts the bridge to tabs it opened itself — adopted user tabs are detached, and `browser_tab_open` / `browser_navigate` create bridge-owned tabs. Works on every VS Code build.
 - On the debug-session path (default, no proposed-API flag): only one tab, web worker and service worker events not captured, and the debug toolbar / "(1)" badge appears while the browser is active.
 - The browser tab lives in the VS Code editor area. Moving it to a side panel is fine; closing it disconnects CDP.

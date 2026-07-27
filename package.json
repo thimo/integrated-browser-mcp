@@ -143,12 +143,12 @@
         "browserBridge.enforceSharing": {
           "type": "boolean",
           "default": false,
-          "description": "Treat VS Code's page sharing as the bridge's access model: drive only tabs the bridge opened itself, plus pages the user has shared. Unsharing then detaches the bridge (within ~2s) and later calls on that tab fail. Sharing state comes from VS Code 1.131+ with chat enabled — the only signal the browser API exposes. Where sharing cannot be expressed (chat disabled or older VS Code), the bridge restricts itself to tabs it opened rather than granting access to everything: agents still work normally, but your existing tabs stay off-limits. Matching is by URL, so two tabs on the same URL are indistinguishable. Requires browserBridge.lmPageDiscovery to see shared pages — with discovery off, only bridge-opened tabs are allowed. Off by default: without it, unsharing does NOT revoke access."
+          "description": "Restrict the bridge to tabs it opened itself. When on, tabs you opened (which the bridge otherwise adopts and can drive) are detached, and later calls on their tabId fail; browser_tab_open / browser_navigate still create bridge-owned tabs, so agents keep working. Works on every VS Code build. Off by default: without it, the bridge drives every browser tab in the window and VS Code's share/unshare does not affect it."
         },
         "browserBridge.lmPageDiscovery": {
           "type": "boolean",
           "default": false,
-          "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds. Off by default. Note: browserBridge.enforceSharing needs this to see shared pages — with discovery off, enforcement can only allow tabs the bridge opened itself."
+          "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds. Off by default."
         },
         "browserBridge.browserType": {
           "type": "string",
