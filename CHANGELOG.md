@@ -23,6 +23,7 @@ Most of this release was contributed by [@RyanEwen](https://github.com/RyanEwen)
 
 ### Changed
 - **Tab marking is now scoped to tabs the bridge opened, and configurable via `browserBridge.tabIndicator`** (`number` (default) / `marker` / `off`). Previously the `(N) ` prefix was applied on adoption — and since the bridge attaches to *every* integrated browser tab in the window, that stamped a prefix onto pages the user had opened themselves. Pages you open are now never touched, and only bridge-opened tabs consume a number (so the agent's first tab is `(1)` even with your own tabs open). `marker` shows a fixed symbol (`browserBridge.tabIndicatorText`) without implying an ordering; setting changes apply immediately, and switching to `off` restores the original titles.
+- A tab opened *from* a bridge-owned tab via a `target="_blank"` link or `window.open()` inherits bridge-ownership: it gets a number and stays drivable under `enforceSharing`. Only children of the bridge's own tabs inherit, so a page in one of your tabs cannot spawn a drivable one. (The right-click "Open link in new tab" gesture carries no opener in Chromium, so tabs opened that way are not covered.)
 - `/navigate` now returns `{ tabId, url, title }` alongside the CDP result.
 
 ### Security

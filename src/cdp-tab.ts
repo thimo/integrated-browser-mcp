@@ -147,6 +147,12 @@ export class CDPTab {
 	 */
 	private _pageSessionId: string | null = null;
 
+	/** CDP target id of this tab's page (for matching a child tab's openerId). */
+	private _pageTargetId: string | null = null;
+
+	/** CDP target id of the target that opened this tab, captured at attach. */
+	private _openerId: string | null = null;
+
 	/** CDP session ID for the browser-level handshake session. */
 	private _browserSessionId: string | null = null;
 
@@ -330,6 +336,33 @@ export class CDPTab {
 	/** Diagnostic: the CDP sessionId for the primary page target (or null). */
 	get pageSessionId(): string | null {
 		return this._pageSessionId;
+	}
+
+	/** CDP target id of this tab's page, for matching a child tab's openerId. */
+	get pageTargetId(): string | null {
+		return this._pageTargetId;
+	}
+
+	/**
+	 * The CDP target id of the target that opened this tab (window.open, a
+	 * link, or "open in new tab"), or undefined if none / unavailable. Used to
+	 * inherit bridge-ownership from a bridge-owned opener. May be unpopulated on
+	 * the BrowserTab transport — callers must tolerate undefined.
+	 */
+	async getOpenerId(): Promise<string | undefined> {
+		// Prefer the value captured at attach; fall back to an explicit
+		// browser-level getTargetInfo (a bare getTargetInfo with no targetId is
+		// not honoured on some proxies).
+		if (this._openerId) return this._openerId;
+		if (!this._pageTargetId) return undefined;
+		try {
+			const r = await this.send('Target.getTargetInfo', { targetId: this._pageTargetId }, {
+				sessionId: this._browserSessionId ?? null,
+			}) as { targetInfo?: { openerId?: string } };
+			return r?.targetInfo?.openerId || undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Diagnostic: list of tracked child sessions (workers/iframes). */
@@ -737,7 +770,7 @@ export class CDPTab {
 		try {
 			const targetsResult = await this.send('Target.getTargets', undefined, {
 				sessionId: browserSessionId,
-			}) as { targetInfos?: Array<{ targetId: string; type: string; url?: string }> };
+			}) as { targetInfos?: Array<{ targetId: string; type: string; url?: string; openerId?: string }> };
 			const pages = (targetsResult.targetInfos ?? []).filter(t => t.type === 'page');
 			if (pages.length === 0) {
 				this.log.appendLine(`[CDP:${this.tabId}] No page target found`);
@@ -747,6 +780,10 @@ export class CDPTab {
 			// the first page is this tab's page. On the websocket path (per-debug-
 			// session), same story. Picking pages[0] is therefore always correct.
 			const page = pages[0];
+			this._pageTargetId = page.targetId;
+			// Capture the opener at attach time — the target info carries it here,
+			// which is more reliable than a later Target.getTargetInfo on some proxies.
+			if (page.openerId) this._openerId = page.openerId;
 			const attachResult = await this.send('Target.attachToTarget', {
 				targetId: page.targetId,
 				flatten: true,

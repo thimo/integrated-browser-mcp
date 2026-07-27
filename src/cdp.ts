@@ -153,6 +153,31 @@ export class CDPManager {
 	 * Record that the bridge owns this tab after the fact, applying the
 	 * indicator that the earlier (unowned) adoption skipped. Idempotent.
 	 */
+	/**
+	 * Mark a freshly-adopted tab as bridge-owned when its CDP opener is a
+	 * bridge-owned tab (window.open / target=_blank / "open in new tab" from an
+	 * agent tab). Only children of the bridge's OWN tabs inherit, so a page in a
+	 * user tab cannot spawn a bridge-owned (drivable-under-enforcement) tab.
+	 * Best-effort: `openerId` may be unpopulated on the BrowserTab transport, in
+	 * which case the tab simply stays user-owned.
+	 */
+	private async inheritOwnershipFromOpener(tab: CDPTab): Promise<void> {
+		try {
+			const openerId = await tab.getOpenerId();
+			if (!openerId) return;
+			for (const other of this.tabs.values()) {
+				if (other !== tab && other.bridgeOwned && other.pageTargetId === openerId) {
+					tab.bridgeOwned = true;
+					if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
+					this.log.appendLine(`[Bridge] Tab ${tab.tabId} inherited ownership from opener ${openerId}`);
+					return;
+				}
+			}
+		} catch (err) {
+			this.log.appendLine(`[Bridge] Opener-inheritance check failed: ${err}`);
+		}
+	}
+
 	private async claimOwnership(tab: CDPTab, makeActive = false): Promise<CDPTab> {
 		// Apply makeActive even if ownership was already set: when the open event
 		// wins the race, openTab's makeActive intent reaches only here, and
@@ -330,6 +355,11 @@ export class CDPManager {
 			// in the page JS; a fresh instance must be allowed to take over).
 			// The title-script's own loop-detection backs off cleanly if it
 			// does somehow end up fighting a stale observer.
+
+			// A tab opened FROM a bridge-owned tab (window.open, target=_blank,
+			// "open in new tab") inherits ownership: it belongs to the agent's
+			// working set, so number it and keep it drivable under enforceSharing.
+			if (!bridgeOwned) await this.inheritOwnershipFromOpener(tab);
 
 			const prefix = this.indicatorPrefixFor(tab);
 			if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
