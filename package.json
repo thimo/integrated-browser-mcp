@@ -47,15 +47,15 @@
     "commands": [
       {
         "command": "browserBridge.start",
-        "title": "Browser Bridge: Start"
+        "title": "Integrated Browser MCP: Start"
       },
       {
         "command": "browserBridge.stop",
-        "title": "Browser Bridge: Stop"
+        "title": "Integrated Browser MCP: Stop"
       },
       {
         "command": "browserBridge.status",
-        "title": "Browser Bridge: Show Status"
+        "title": "Integrated Browser MCP: Show Status"
       },
       {
         "command": "browserBridge.openInBrowser",
@@ -79,7 +79,7 @@
       ]
     },
     "configuration": {
-      "title": "Browser Bridge",
+      "title": "Integrated Browser MCP",
       "properties": {
         "browserBridge.transport": {
           "type": "string",

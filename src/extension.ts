@@ -179,7 +179,7 @@ async function listenBest(
 
 async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 	if (running) {
-		vscode.window.showInformationMessage('Browser MCP is already running.');
+		vscode.window.showInformationMessage('Integrated Browser MCP is already running.');
 		return;
 	}
 
@@ -282,7 +282,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		log.appendLine(`[Bridge] Started successfully on ${actualEndpoint.socketPath ?? `port ${actualEndpoint.port}`}`);
 	} catch (err) {
 		log.appendLine(`[Bridge] Failed to start: ${err}`);
-		vscode.window.showErrorMessage(`Browser MCP failed to start: ${err}`);
+		vscode.window.showErrorMessage(`Integrated Browser MCP failed to start: ${err}`);
 		await stopBridge();
 	}
 }
@@ -420,7 +420,7 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
 	const launched = await vscode.debug.startDebugging(undefined, {
 		type: browserType,
 		request: 'launch',
-		name: 'Browser MCP',
+		name: 'Integrated Browser MCP',
 		url: initialUrl,
 		internalConsoleOptions: 'neverOpen',
 	}, {
@@ -635,7 +635,7 @@ async function openInBrowser(uri?: vscode.Uri): Promise<void> {
 	}
 	const url = uri.toString();
 	if (!cdp) {
-		vscode.window.showErrorMessage('Browser Bridge is not active in this window. Run "Browser Bridge: Start" from the Command Palette.');
+		vscode.window.showErrorMessage('Integrated Browser MCP is not active in this window. Run "Integrated Browser MCP: Start" from the Command Palette.');
 		return;
 	}
 	try {
@@ -664,7 +664,7 @@ function showStatus(): void {
 	const tabs = cdp?.tabCount ?? 0;
 
 	vscode.window.showInformationMessage(
-		`Browser MCP: CDP ${cdpState} (${transport}), API on ${endpoint} (${serverState}), ${tabs} tab(s)`,
+		`Integrated Browser MCP: CDP ${cdpState} (${transport}), API on ${endpoint} (${serverState}), ${tabs} tab(s)`,
 	);
 }
 

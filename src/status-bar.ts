@@ -26,24 +26,24 @@ export class StatusBar {
 
 		if (!serverRunning) {
 			this.item.text = '$(circle-slash) Browser MCP';
-			this.item.tooltip = 'Browser MCP: Off';
+			this.item.tooltip = 'Integrated Browser MCP: Off';
 			this.item.backgroundColor = undefined;
 			this.item.color = undefined;
 		} else if (cdpState === 'connected') {
 			this.item.text = `$(broadcast) Browser MCP${countSuffix}`;
-			this.item.tooltip = `Browser MCP: Connected${transportTag}${activeUrlLine}${tabLine}`;
+			this.item.tooltip = `Integrated Browser MCP: Connected${transportTag}${activeUrlLine}${tabLine}`;
 			this.item.backgroundColor = undefined;
 			this.item.color = undefined;
 		} else if (cdpState === 'connecting') {
 			this.item.text = '$(sync~spin) Browser MCP';
-			this.item.tooltip = 'Browser MCP: Connecting...';
+			this.item.tooltip = 'Integrated Browser MCP: Connecting...';
 			this.item.backgroundColor = undefined;
 			this.item.color = undefined;
 		} else if (tabs.count > 0) {
 			// Tabs exist but none is connected — the CDP link dropped
 			// unexpectedly. Warn so the user knows.
 			this.item.text = '$(warning) Browser MCP';
-			this.item.tooltip = `Browser MCP: Disconnected${tabLine}`;
+			this.item.tooltip = `Integrated Browser MCP: Disconnected${tabLine}`;
 			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 			// `statusBarItem.warningForeground` resolves to a dark colour on
 			// some themes, yielding black-on-brown. Hardcode white for
@@ -52,7 +52,7 @@ export class StatusBar {
 		} else {
 			// Idle: bridge is up, no tabs open. Not an error state.
 			this.item.text = '$(circle-outline) Browser MCP';
-			this.item.tooltip = 'Browser MCP: Idle (no browser tabs)';
+			this.item.tooltip = 'Integrated Browser MCP: Idle (no browser tabs)';
 			this.item.backgroundColor = undefined;
 			this.item.color = undefined;
 		}

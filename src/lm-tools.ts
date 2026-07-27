@@ -56,7 +56,7 @@ export function registerLanguageModelTools(
 					invoke: async options => {
 						const manager = cdp();
 						if (!manager) {
-							return textResult('The Integrated Browser bridge is not running. Start it with "Browser Bridge: Start".');
+							return textResult('The Integrated Browser MCP bridge is not running. Start it with "Integrated Browser MCP: Start".');
 						}
 						// Honour enforceSharing here too: without this, Copilot could
 						// keep reading an unshared user tab's buffers/list via these
