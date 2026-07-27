@@ -52,6 +52,24 @@ function instanceId(workspacePath: string): string {
 	return crypto.createHash('md5').update(key).digest('hex').slice(0, 12);
 }
 
+/**
+ * Read a setting under the current `integratedBrowserMcp.*` namespace, falling
+ * back to an explicitly-set legacy `browserBridge.*` value. Only the three
+ * settings that shipped under the old name (httpPort, autoStart, browserType)
+ * need this; the legacy keys stay defined-and-deprecated in package.json so a
+ * user's existing settings.json keeps taking effect after the rename.
+ */
+function migratedGet<T>(key: string, def: T): T {
+	const c = vscode.workspace.getConfiguration();
+	const neu = c.inspect<T>(`integratedBrowserMcp.${key}`);
+	const explicitNew = neu?.workspaceFolderValue ?? neu?.workspaceValue ?? neu?.globalValue;
+	if (explicitNew !== undefined) return explicitNew;
+	const old = c.inspect<T>(`browserBridge.${key}`);
+	const explicitOld = old?.workspaceFolderValue ?? old?.workspaceValue ?? old?.globalValue;
+	if (explicitOld !== undefined) return explicitOld;
+	return def;
+}
+
 /** True when something is actively accepting on this socket path (don't unlink a live one). */
 function socketIsLive(socketPath: string): Promise<boolean> {
 	return new Promise(resolve => {
@@ -67,13 +85,23 @@ export function activate(context: vscode.ExtensionContext) {
 	log = vscode.window.createOutputChannel('Integrated Browser MCP');
 	statusBar = new StatusBar();
 
+	// Commands moved to the integratedBrowserMcp.* namespace; the old
+	// browserBridge.* ids stay registered as aliases so existing keybindings
+	// keep working.
+	const registerCmd = (name: string, handler: (...args: unknown[]) => unknown): void => {
+		context.subscriptions.push(
+			vscode.commands.registerCommand(`integratedBrowserMcp.${name}`, handler),
+			vscode.commands.registerCommand(`browserBridge.${name}`, handler),
+		);
+	};
+	registerCmd('start', () => startBridge(context));
+	registerCmd('stop', stopBridge);
+	registerCmd('status', showStatus);
+	registerCmd('openInBrowser', (uri?: unknown) => openInBrowser(uri as vscode.Uri | undefined));
+
 	context.subscriptions.push(
 		log,
 		statusBar,
-		vscode.commands.registerCommand('browserBridge.start', () => startBridge(context)),
-		vscode.commands.registerCommand('browserBridge.stop', stopBridge),
-		vscode.commands.registerCommand('browserBridge.status', showStatus),
-		vscode.commands.registerCommand('browserBridge.openInBrowser', (uri?: vscode.Uri) => openInBrowser(uri)),
 		vscode.debug.onDidStartDebugSession(session => {
 			// Auto-connect to externally launched browser child sessions on the
 			// fallback (websocket) path. Skip root sessions (no CDP), skip if
@@ -99,8 +127,8 @@ export function activate(context: vscode.ExtensionContext) {
 			// Re-apply or clear indicators immediately. Without this, switching
 			// the setting off would leave every already-marked page carrying a
 			// modified title until it happened to be reopened.
-			if (event.affectsConfiguration('browserBridge.tabIndicator')
-				|| event.affectsConfiguration('browserBridge.tabIndicatorText')) {
+			if (event.affectsConfiguration('integratedBrowserMcp.tabIndicator')
+				|| event.affectsConfiguration('integratedBrowserMcp.tabIndicatorText')) {
 				cdp?.refreshIndicators().catch(err => log.appendLine(`[Bridge] Indicator refresh failed: ${err}`));
 			}
 		}),
@@ -117,8 +145,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// double-register the same id.
 	registerMcpProvider(context);
 
-	const config = vscode.workspace.getConfiguration('browserBridge');
-	if (config.get<boolean>('autoStart', true)) {
+	if (migratedGet('autoStart', true)) {
 		startBridge(context);
 	}
 }
@@ -154,7 +181,7 @@ async function ensureSocketsDir(): Promise<void> {
 
 /**
  * Prefer a socket/pipe (no listening port at all); fall back to TCP when it
- * cannot be created, or when the user pins `browserBridge.transport` to tcp.
+ * cannot be created, or when the user pins `integratedBrowserMcp.transport` to tcp.
  * TCP is still needed when the MCP client cannot reach the extension host's
  * filesystem — though instance discovery already assumes it can.
  */
@@ -183,8 +210,8 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		return;
 	}
 
-	const config = vscode.workspace.getConfiguration('browserBridge');
-	const preferredPort = config.get<number>('httpPort', 3788);
+	const config = vscode.workspace.getConfiguration('integratedBrowserMcp');
+	const preferredPort = migratedGet('httpPort', 3788);
 
 	try {
 		// 0. Publish the current MCP server first. A client (e.g. Claude Code)
@@ -414,8 +441,7 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
 		});
 	});
 
-	const config = vscode.workspace.getConfiguration('browserBridge');
-	const browserType = config.get<string>('browserType', 'editor-browser');
+	const browserType = migratedGet('browserType', 'editor-browser');
 
 	const launched = await vscode.debug.startDebugging(undefined, {
 		type: browserType,

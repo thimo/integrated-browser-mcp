@@ -25,7 +25,7 @@ The extension uses VS Code's built-in `editor-browser` and the Chrome DevTools P
    ```bash
    code --install-extension thimo.integrated-browser-mcp
    ```
-2. The bridge starts automatically. Agents reach it over a unix socket (named pipe on Windows) at `~/.integrated-browser-mcp/sockets/` — set `browserBridge.transport` to `tcp` for the classic `localhost:3788` port instead
+2. The bridge starts automatically. Agents reach it over a unix socket (named pipe on Windows) at `~/.integrated-browser-mcp/sockets/` — set `integratedBrowserMcp.transport` to `tcp` for the classic `localhost:3788` port instead
 3. For Claude Code: the MCP server is auto-configured in `~/.claude.json` on first activation
 4. The browser launches lazily on the first request — no browser tab until you need one
 
@@ -60,7 +60,7 @@ curl --unix-socket ~/.integrated-browser-mcp/sockets/<id>.sock \
   -d '{"url":"http://localhost:3000"}'
 ```
 
-The exact socket path is in `~/.integrated-browser-mcp/instances/<hash>.json`. Prefer a plain TCP port? Set `browserBridge.transport` to `"tcp"` and use `http://127.0.0.1:3788` like before.
+The exact socket path is in `~/.integrated-browser-mcp/instances/<hash>.json`. Prefer a plain TCP port? Set `integratedBrowserMcp.transport` to `"tcp"` and use `http://127.0.0.1:3788` like before.
 
 See [HTTP API](#http-api) below for the full endpoint list.
 
@@ -92,7 +92,7 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_tab_close` | Close a tab by id |
 | `browser_tab_list` | List open tabs with their ids, URLs, titles, and active flag |
 | `browser_tab_activate` | Set the default target tab |
-| `browser_pages_discover` | List integrated browser pages VS Code knows about, including ones the bridge isn't attached to. Needs VS Code 1.131+ and `browserBridge.lmPageDiscovery` (off by default until that path is verified). |
+| `browser_pages_discover` | List integrated browser pages VS Code knows about, including ones the bridge isn't attached to. Needs VS Code 1.131+ and `integratedBrowserMcp.lmPageDiscovery` (off by default until that path is verified). |
 | `browser_status` | Check bridge connection status, including a `capabilities` block reporting what this build supports |
 
 ## HTTP API
@@ -126,7 +126,7 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 | POST | `/tab/close/:tabId` | — | Close a tab |
 | POST | `/tab/activate/:tabId` | — | Set the active (default) tab |
 | POST | `/pixel` | `{ selector?, points?, waitMs?, tabId? }` | Sample on-screen colour(s). `selector` samples that element's centre; `points` are page coordinates in CSS pixels. Returns `{ samples: [{ hex, r, g, b, a, x, y }] }`. |
-| GET | `/pages` | — | Integrated browser pages known to VS Code, including unattached ones. Needs VS Code 1.131+ and `browserBridge.lmPageDiscovery`. |
+| GET | `/pages` | — | Integrated browser pages known to VS Code, including unattached ones. Needs VS Code 1.131+ and `integratedBrowserMcp.lmPageDiscovery`. |
 
 ## Multi-window support and endpoint discovery
 
@@ -193,7 +193,7 @@ Multi-tab support requires the proposed API (previous section). When enabled:
 
 The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. The bridge strips any prefix a prior version of the extension may have left on a pre-existing tab, so you won't see stacked markers after an upgrade.
 
-**Only tabs the bridge opened itself are numbered and marked** — pages you open yourself are adopted (and drivable) but their titles are never touched, and their `number` is `null`. `browserBridge.tabIndicator` tunes the marking: `number` (default), `marker` (a fixed symbol via `browserBridge.tabIndicatorText`, no ordering implied), or `off`. The prefix rewrites the page's real `document.title`, so the page can observe it — choose `off` if a page or tool needs the unmodified title.
+**Only tabs the bridge opened itself are numbered and marked** — pages you open yourself are adopted (and drivable) but their titles are never touched, and their `number` is `null`. `integratedBrowserMcp.tabIndicator` tunes the marking: `number` (default), `marker` (a fixed symbol via `integratedBrowserMcp.tabIndicatorText`, no ordering implied), or `off`. The prefix rewrites the page's real `document.title`, so the page can observe it — choose `off` if a page or tool needs the unmodified title.
 
 On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
 
@@ -218,8 +218,8 @@ Caveats:
 
 ## Limitations and trust model
 
-- The bridge listens on a unix socket / named pipe with owner-only permissions by default — nothing is bound to a network interface, no port to scan, and other local users can't connect. On `browserBridge.transport: "tcp"` it binds `127.0.0.1` only, with no authentication — reachable by any local process, same trust model as VS Code's built-in terminals.
+- The bridge listens on a unix socket / named pipe with owner-only permissions by default — nothing is bound to a network interface, no port to scan, and other local users can't connect. On `integratedBrowserMcp.transport: "tcp"` it binds `127.0.0.1` only, with no authentication — reachable by any local process, same trust model as VS Code's built-in terminals.
 - `/eval` runs arbitrary JavaScript in the open page — same trust model as the DevTools console. Don't pass untrusted input.
-- VS Code's page-sharing toggle does not govern this bridge by default: it drives every tab it can attach to. The opt-in `browserBridge.enforceSharing` setting restricts the bridge to tabs it opened itself — adopted user tabs are detached, and `browser_tab_open` / `browser_navigate` create bridge-owned tabs. Works on every VS Code build.
+- VS Code's page-sharing toggle does not govern this bridge by default: it drives every tab it can attach to. The opt-in `integratedBrowserMcp.enforceSharing` setting restricts the bridge to tabs it opened itself — adopted user tabs are detached, and `browser_tab_open` / `browser_navigate` create bridge-owned tabs. Works on every VS Code build.
 - On the debug-session path (default, no proposed-API flag): only one tab, web worker and service worker events not captured, and the debug toolbar / "(1)" badge appears while the browser is active.
 - The browser tab lives in the VS Code editor area. Moving it to a side panel is fine; closing it disconnects CDP.

@@ -6,7 +6,7 @@ export class StatusBar {
 
 	constructor() {
 		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-		this.item.command = 'browserBridge.status';
+		this.item.command = 'integratedBrowserMcp.status';
 		this.update('disconnected', false);
 		this.item.show();
 	}

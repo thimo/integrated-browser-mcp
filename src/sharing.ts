@@ -4,7 +4,7 @@ import type { CDPManager } from './cdp';
 
 /**
  * Opt-in restriction of the bridge to the tabs it opened itself
- * (`browserBridge.enforceSharing`, default off).
+ * (`integratedBrowserMcp.enforceSharing`, default off).
  *
  * Why this shape: the proposed `browser` API the bridge attaches through exposes
  * **no** sharing state — `BrowserTab` is only `url`/`title`/`icon`/
@@ -19,7 +19,7 @@ import type { CDPManager } from './cdp';
  */
 
 export function isEnforcementEnabled(): boolean {
-	return vscode.workspace.getConfiguration('browserBridge').get<boolean>('enforceSharing', false);
+	return vscode.workspace.getConfiguration('integratedBrowserMcp').get<boolean>('enforceSharing', false);
 }
 
 /**
@@ -40,7 +40,7 @@ export function normalizeUrl(url: string): string {
 
 /**
  * Detach every tab the bridge did not open itself, when
- * `browserBridge.enforceSharing` is on. Shared by the HTTP guard and the
+ * `integratedBrowserMcp.enforceSharing` is on. Shared by the HTTP guard and the
  * language-model tools so both honour the same access model. No-op when off.
  */
 export async function enforceSharing(cdp: CDPManager, log?: OutputChannel): Promise<void> {
@@ -48,6 +48,6 @@ export async function enforceSharing(cdp: CDPManager, log?: OutputChannel): Prom
 	for (const info of cdp.list()) {
 		const tab = cdp.getTab(info.tabId);
 		if (!tab || tab.bridgeOwned) continue;
-		await cdp.revokeTab(info.tabId, 'browserBridge.enforceSharing is on: the bridge drives only tabs it opened itself');
+		await cdp.revokeTab(info.tabId, 'integratedBrowserMcp.enforceSharing is on: the bridge drives only tabs it opened itself');
 	}
 }

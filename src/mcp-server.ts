@@ -183,7 +183,7 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 const SERVER_INSTRUCTIONS = `
 This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
 
-Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (The number also appears in the tab title for tabs the bridge opened, per \`browserBridge.tabIndicator\`; tabs the user opened are never marked.)
+Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (The number also appears in the tab title for tabs the bridge opened, per \`integratedBrowserMcp.tabIndicator\`; tabs the user opened are never marked.)
 
 If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs. In that mode discovery text from VS Code will claim shared pages "can be interacted with"; that is VS Code's copy and is not true here.
 

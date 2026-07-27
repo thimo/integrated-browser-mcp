@@ -134,8 +134,8 @@ Start immediately when VS Code opens — don't wait for a command.
 
 ## package.json contributions
 - Status bar item
-- Commands: `browserBridge.start`, `browserBridge.stop`, `browserBridge.status`
-- Settings: `browserBridge.httpPort` (default 3788), `browserBridge.autoStart` (default true)
+- Commands: `integratedBrowserMcp.start`, `integratedBrowserMcp.stop`, `integratedBrowserMcp.status`
+- Settings: `integratedBrowserMcp.httpPort` (default 3788), `integratedBrowserMcp.autoStart` (default true)
 
 ## Security
 - HTTP server binds to `127.0.0.1` only — never exposed to network

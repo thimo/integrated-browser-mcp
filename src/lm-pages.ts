@@ -98,9 +98,9 @@ export function isDiscoveryAvailable(): boolean {
 	return lm.tools.some(tool => tool.name === LIST_PAGES_TOOL);
 }
 
-/** True when the user has opted in via `browserBridge.lmPageDiscovery`. Off by default until the 1.131 path has been verified first-hand. */
+/** True when the user has opted in via `integratedBrowserMcp.lmPageDiscovery`. Off by default until the 1.131 path has been verified first-hand. */
 export function isDiscoveryEnabled(): boolean {
-	return vscode.workspace.getConfiguration('browserBridge').get<boolean>('lmPageDiscovery', false);
+	return vscode.workspace.getConfiguration('integratedBrowserMcp').get<boolean>('lmPageDiscovery', false);
 }
 
 /**
@@ -227,7 +227,7 @@ function buildHint(pageCount: number, unsharedCount: number): string {
  */
 export async function discoverPages(log?: vscode.OutputChannel): Promise<PageDiscovery> {
 	if (!isDiscoveryEnabled()) {
-		return { available: false, reason: 'Disabled via browserBridge.lmPageDiscovery', pages: [], unsharedCount: 0 };
+		return { available: false, reason: 'Disabled via integratedBrowserMcp.lmPageDiscovery', pages: [], unsharedCount: 0 };
 	}
 	if (!isDiscoveryAvailable()) {
 		return unavailable(`This VS Code build does not expose the '${LIST_PAGES_TOOL}' language model tool`);

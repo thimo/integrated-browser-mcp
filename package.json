@@ -46,33 +46,33 @@
   "contributes": {
     "commands": [
       {
-        "command": "browserBridge.start",
+        "command": "integratedBrowserMcp.start",
         "title": "Integrated Browser MCP: Start"
       },
       {
-        "command": "browserBridge.stop",
+        "command": "integratedBrowserMcp.stop",
         "title": "Integrated Browser MCP: Stop"
       },
       {
-        "command": "browserBridge.status",
+        "command": "integratedBrowserMcp.status",
         "title": "Integrated Browser MCP: Show Status"
       },
       {
-        "command": "browserBridge.openInBrowser",
+        "command": "integratedBrowserMcp.openInBrowser",
         "title": "Open in Integrated Browser"
       }
     ],
     "menus": {
       "explorer/context": [
         {
-          "command": "browserBridge.openInBrowser",
+          "command": "integratedBrowserMcp.openInBrowser",
           "when": "resourceExtname == .html || resourceExtname == .htm || resourceExtname == .pdf || resourceExtname == .svg",
           "group": "navigation@30"
         }
       ],
       "editor/title/context": [
         {
-          "command": "browserBridge.openInBrowser",
+          "command": "integratedBrowserMcp.openInBrowser",
           "when": "resourceExtname == .html || resourceExtname == .htm || resourceExtname == .pdf || resourceExtname == .svg",
           "group": "1_open@30"
         }
@@ -81,7 +81,7 @@
     "configuration": {
       "title": "Integrated Browser MCP",
       "properties": {
-        "browserBridge.transport": {
+        "integratedBrowserMcp.transport": {
           "type": "string",
           "default": "auto",
           "enum": [
@@ -96,17 +96,17 @@
           ],
           "description": "How external agents reach the bridge. The default avoids opening any listening port: it binds a unix socket (or named pipe on Windows) that no other machine can reach and no port scan can find. TCP remains available for setups where the MCP client and the extension host do not share a filesystem."
         },
-        "browserBridge.httpPort": {
+        "integratedBrowserMcp.httpPort": {
           "type": "number",
           "default": 3788,
-          "description": "TCP port used only when browserBridge.transport resolves to tcp. Ignored when listening on a socket/pipe."
+          "description": "TCP port used only when integratedBrowserMcp.transport resolves to tcp. Ignored when listening on a socket/pipe."
         },
-        "browserBridge.autoStart": {
+        "integratedBrowserMcp.autoStart": {
           "type": "boolean",
           "default": true,
           "description": "Automatically start the bridge when VS Code opens"
         },
-        "browserBridge.tabIndicator": {
+        "integratedBrowserMcp.tabIndicator": {
           "type": "string",
           "default": "number",
           "enum": [
@@ -121,7 +121,7 @@
           ],
           "description": "How to mark browser tabs that are under agent control. Only tabs the bridge opened itself are marked — pages you opened are never touched. Marking works by rewriting the page's real document.title (the only lever an extension has over the editor tab label), so the page can observe it: choose 'off' if a page or tool needs the unmodified title, e.g. when reading it back via browser_eval."
         },
-        "browserBridge.tabIndicatorText": {
+        "integratedBrowserMcp.tabIndicatorText": {
           "type": "string",
           "default": "●",
           "enum": [
@@ -138,19 +138,19 @@
             "Robot — colour emoji, unambiguously 'an agent'; same font caveat",
             "Plain ASCII — cannot fail to render, at the cost of width"
           ],
-          "description": "Symbol shown on tabs the agent controls when browserBridge.tabIndicator is 'marker'. A trailing space is added automatically. Emoji options render in colour on Windows and macOS but can appear as a placeholder box on systems without an emoji font."
+          "description": "Symbol shown on tabs the agent controls when integratedBrowserMcp.tabIndicator is 'marker'. A trailing space is added automatically. Emoji options render in colour on Windows and macOS but can appear as a placeholder box on systems without an emoji font."
         },
-        "browserBridge.enforceSharing": {
+        "integratedBrowserMcp.enforceSharing": {
           "type": "boolean",
           "default": false,
           "description": "Restrict the bridge to tabs it opened itself. When on, tabs you opened (which the bridge otherwise adopts and can drive) are detached, and later calls on their tabId fail; browser_tab_open / browser_navigate still create bridge-owned tabs, so agents keep working. Works on every VS Code build. Off by default: without it, the bridge drives every browser tab in the window and VS Code's share/unshare does not affect it."
         },
-        "browserBridge.lmPageDiscovery": {
+        "integratedBrowserMcp.lmPageDiscovery": {
           "type": "boolean",
           "default": false,
           "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds. Off by default."
         },
-        "browserBridge.browserType": {
+        "integratedBrowserMcp.browserType": {
           "type": "string",
           "default": "editor-browser",
           "enum": [
@@ -162,6 +162,18 @@
             "External Chrome window (more reliable CDP support)"
           ],
           "description": "Which browser type to launch for automation"
+        },
+        "browserBridge.httpPort": {
+          "type": "number",
+          "deprecationMessage": "Renamed to integratedBrowserMcp.httpPort. Your existing value still takes effect, but move it to the new key — this one will be removed in a future release."
+        },
+        "browserBridge.autoStart": {
+          "type": "boolean",
+          "deprecationMessage": "Renamed to integratedBrowserMcp.autoStart. Your existing value still takes effect, but move it to the new key — this one will be removed in a future release."
+        },
+        "browserBridge.browserType": {
+          "type": "string",
+          "deprecationMessage": "Renamed to integratedBrowserMcp.browserType. Your existing value still takes effect, but move it to the new key — this one will be removed in a future release."
         }
       }
     },

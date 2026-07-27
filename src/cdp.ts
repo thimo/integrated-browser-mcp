@@ -63,12 +63,12 @@ export type TabIndicatorMode = 'off' | 'marker' | 'number';
  *  - `off` — never touch titles.
  */
 function tabIndicatorMode(): TabIndicatorMode {
-	const value = vscode.workspace.getConfiguration('browserBridge').get<string>('tabIndicator', 'number');
+	const value = vscode.workspace.getConfiguration('integratedBrowserMcp').get<string>('tabIndicator', 'number');
 	return value === 'off' || value === 'marker' || value === 'number' ? value : 'number';
 }
 
 function tabIndicatorText(): string {
-	const raw = vscode.workspace.getConfiguration('browserBridge').get<string>('tabIndicatorText', '●');
+	const raw = vscode.workspace.getConfiguration('integratedBrowserMcp').get<string>('tabIndicatorText', '●');
 	// The setting offers bare symbols so the dropdown reads cleanly (a trailing
 	// space would be invisible there), but the prefix needs one to separate it
 	// from the title. Normalising also keeps older settings that already

@@ -236,7 +236,7 @@ export class BridgeServer {
 
 	/**
 	 * Detach from any user-owned tab whose page is no longer shared, when
-	 * `browserBridge.enforceSharing` is on. Runs before tab-targeted work so a
+	 * `integratedBrowserMcp.enforceSharing` is on. Runs before tab-targeted work so a
 	 * revoked page cannot be driven through a `tabId` captured earlier.
 	 */
 	private enforceSharing(): Promise<void> {
@@ -251,13 +251,13 @@ export class BridgeServer {
 			return {
 				enforced: false,
 				mode: 'off',
-				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Browser Bridge: Stop). Set browserBridge.enforceSharing to restrict the bridge to tabs it opened itself.',
+				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Integrated Browser MCP: Stop). Set integratedBrowserMcp.enforceSharing to restrict the bridge to tabs it opened itself.',
 			};
 		}
 		return {
 			enforced: true,
 			mode: 'bridge-owned-only',
-			note: 'browserBridge.enforceSharing is on: the bridge drives ONLY tabs it opened itself; adopted user tabs are detached and later calls on their tabId fail. browser_tab_open / browser_navigate create bridge-owned tabs, so agents still work.',
+			note: 'integratedBrowserMcp.enforceSharing is on: the bridge drives ONLY tabs it opened itself; adopted user tabs are detached and later calls on their tabId fail. browser_tab_open / browser_navigate create bridge-owned tabs, so agents still work.',
 		};
 	}
 
