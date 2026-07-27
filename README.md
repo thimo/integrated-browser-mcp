@@ -161,6 +161,8 @@ cat ~/.integrated-browser-mcp/instances/*.json
 
 Stale instance files from crashed VS Code windows are cleaned up automatically on the next window startup. You can also delete them manually.
 
+**After upgrading the extension**, fully restart any long-lived MCP client (e.g. `/exit` and relaunch Claude Code). The client spawns the bundled MCP server once and keeps that process running; an older server started before the upgrade can't reach a bridge that has since switched to a unix socket, and falls back to a TCP port — reporting "not reachable" or, in a multi-window setup, occasionally talking to a different window. Restarting the client picks up the new server.
+
 ## Enabling worker event capture (proposed API)
 
 By default the bridge launches the integrated browser via a VS Code debug session and talks to it through `vscode-js-debug`'s CDP proxy. That proxy only forwards events from the main page session — so logs and network requests from web workers and service workers never reach the `/console` and `/network` buffers.
