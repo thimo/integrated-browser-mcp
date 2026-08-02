@@ -61,7 +61,7 @@ export function registerLanguageModelTools(
 						// Honour enforceSharing here too: without this, Copilot could
 						// keep reading an unshared user tab's buffers/list via these
 						// tools while the HTTP layer revoked it.
-						await enforceSharing(manager, log).catch(err => log.appendLine(`[LM] enforcement failed: ${err}`));
+						await enforceSharing(manager).catch(err => log.appendLine(`[LM] enforcement failed: ${err}`));
 						return textResult(handler(options.input ?? {}));
 					},
 				}),

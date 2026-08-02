@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import type { OutputChannel } from 'vscode';
 import type { CDPManager } from './cdp';
 
 /**
@@ -27,7 +26,7 @@ export function isEnforcementEnabled(): boolean {
  * `integratedBrowserMcp.enforceSharing` is on. Shared by the HTTP guard and the
  * language-model tools so both honour the same access model. No-op when off.
  */
-export async function enforceSharing(cdp: CDPManager, log?: OutputChannel): Promise<void> {
+export async function enforceSharing(cdp: CDPManager): Promise<void> {
 	if (!isEnforcementEnabled()) return;
 	for (const info of cdp.list()) {
 		const tab = cdp.getTab(info.tabId);

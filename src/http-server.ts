@@ -240,7 +240,7 @@ export class BridgeServer {
 	private enforceSharing(): Promise<void> {
 		// Delegates to the shared implementation so the language-model tools
 		// honour the same access model (they previously bypassed it entirely).
-		return runEnforceSharing(this.cdp, this.log);
+		return runEnforceSharing(this.cdp);
 	}
 
 	/** Report the access model plainly, without overstating what it guarantees. */
