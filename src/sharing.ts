@@ -23,22 +23,6 @@ export function isEnforcementEnabled(): boolean {
 }
 
 /**
- * Join key for cross-referencing a discovered page with a bridge tab by URL
- * (display only, in `/pages`; NOT an access decision). Lowercase origin
- * (scheme+host, case-insensitive); keep path/query case; drop fragment and a
- * trailing slash. protocol+host, not `u.origin`, so opaque schemes
- * (chrome://, about:) keep their host instead of collapsing to "null".
- */
-export function normalizeUrl(url: string): string {
-	try {
-		const u = new URL(url);
-		return (u.protocol + '//' + u.host).toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search;
-	} catch {
-		return url.replace(/#.*$/, '').replace(/\/+$/, '');
-	}
-}
-
-/**
  * Detach every tab the bridge did not open itself, when
  * `integratedBrowserMcp.enforceSharing` is on. Shared by the HTTP guard and the
  * language-model tools so both honour the same access model. No-op when off.

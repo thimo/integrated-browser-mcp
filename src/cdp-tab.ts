@@ -264,8 +264,8 @@ export class CDPTab {
 	 * tab's observable state has caught up: `BrowserTab.url` can still read
 	 * `about:blank` and `BrowserTab.title` can still be the raw URL. Callers
 	 * that answered immediately therefore described the page wrongly, and
-	 * `/tabs`, discovery, and the live `document.title` could disagree three
-	 * ways. Bounded and best-effort — a page that genuinely stays on
+	 * `/tabs` and the live `document.title` could disagree. Bounded and
+	 * best-effort — a page that genuinely stays on
 	 * `about:blank` just costs the timeout.
 	 */
 	async settleNavigation(timeoutMs = 3000): Promise<void> {

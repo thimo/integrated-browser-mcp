@@ -92,7 +92,6 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_tab_close` | Close a tab by id |
 | `browser_tab_list` | List open tabs with their ids, URLs, titles, and active flag |
 | `browser_tab_activate` | Set the default target tab |
-| `browser_pages_discover` | List integrated browser pages VS Code knows about, including ones the bridge isn't attached to. Needs VS Code 1.131+ and `integratedBrowserMcp.lmPageDiscovery` (off by default until that path is verified). |
 | `browser_status` | Check bridge connection status, including a `capabilities` block reporting what this build supports |
 
 ## HTTP API
@@ -126,7 +125,6 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 | POST | `/tab/close/:tabId` | — | Close a tab |
 | POST | `/tab/activate/:tabId` | — | Set the active (default) tab |
 | POST | `/pixel` | `{ selector?, points?, waitMs?, tabId? }` | Sample on-screen colour(s). `selector` samples that element's centre; `points` are page coordinates in CSS pixels. Returns `{ samples: [{ hex, r, g, b, a, x, y }] }`. |
-| GET | `/pages` | — | Integrated browser pages known to VS Code, including unattached ones. Needs VS Code 1.131+ and `integratedBrowserMcp.lmPageDiscovery`. |
 
 ## Multi-window support and endpoint discovery
 

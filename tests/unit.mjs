@@ -88,43 +88,6 @@ const section = name => console.log(`\n${name}`);
 	eq('tolerates a default port in the composed origin', strip('Local (http://localhost:80/)', 'http://localhost/app'), 'Local');
 }
 
-// ---------------------------------------------------------------- lm-pages
-{
-	section('parsePageListing — VS Code emits freeform text, not JSON');
-	const { parsePageListing: parse, sanitizeRaw } = await load('src/lm-pages.ts');
-
-	const listing = [
-		'The following browser pages are currently shared with you and can be interacted with using the browser tools:',
-		'- [page-abc] Pottagold (http://localhost:3000/) (active)',
-		'- [page-def] Profit and loss (Q3) (http://localhost:3000/reports) (visible)',
-		'- [page-ghi] Untitled (about:blank) (not visible)',
-		'',
-		'2 pages are open but not shared.',
-		"Use the 'open_browser_page' tool to open a new page.",
-	].join('\n');
-
-	const parsed = parse(listing);
-	eq('parses every entry', parsed.pages.length, 3);
-	eq('reads the unshared count', parsed.unsharedCount, 2);
-	eq('plain page', parsed.pages[0], { pageId: 'page-abc', title: 'Pottagold', url: 'http://localhost:3000/', visibility: 'active', blocked: false });
-	// URL is the *last* parenthesised group, so titles may contain parentheses.
-	eq('title containing parentheses', parsed.pages[1], { pageId: 'page-def', title: 'Profit and loss (Q3)', url: 'http://localhost:3000/reports', visibility: 'visible', blocked: false });
-	eq('about:blank and multiword visibility', parsed.pages[2], { pageId: 'page-ghi', title: 'Untitled', url: 'about:blank', visibility: 'not visible', blocked: false });
-
-	// A policy-blocked page has no URL group at all.
-	eq('policy-blocked page', parse('- [p-x] Blocked by network domain policy (active)').pages[0],
-		{ pageId: 'p-x', title: 'Blocked by network domain policy', url: null, visibility: 'active', blocked: true });
-
-	eq('singular phrasing', parse('1 page is open but not shared.').unsharedCount, 1);
-	eq('nothing shared', parse('No browser pages are currently shared with you.\n\n3 pages are open but not shared.'), { pages: [], unsharedCount: 3 });
-	eq('nothing open', parse('No browser pages are currently open.'), { pages: [], unsharedCount: 0 });
-	eq('url containing parentheses', parse('- [p1] Doc (https://ex.com/a_(b)) (visible)').pages[0].url, 'https://ex.com/a_(b)');
-
-	// Guidance naming tools we do not expose would be acted on by a model.
-	eq('strips foreign tool guidance', /open_browser_page/.test(sanitizeRaw(listing)), false);
-	eq('keeps the rest of the listing', sanitizeRaw(listing).includes('2 pages are open but not shared.'), true);
-}
-
 // ------------------------------------------------------------ http-server
 {
 	section('projectAXNodes — a raw SPA tree is six figures of characters');
@@ -289,23 +252,6 @@ const section = name => console.log(`\n${name}`);
 	throws('rejects an oversized header', () => decodePng(bigPng));
 
 	throws('rejects a non-PNG', () => decodePng(Buffer.from('definitely not a png')));
-}
-
-// ---------------------------------------------------------------- sharing
-{
-	section('normalizeUrl — the enforcement join key must not fold distinct pages together');
-	const { normalizeUrl: norm } = await load('src/sharing.ts');
-
-	// Origin is case-insensitive; path and query are NOT.
-	eq('lowercases the origin', norm('HTTPS://Example.COM/Path'), 'https://example.com/Path');
-	eq('keeps path case (Admin != admin)', norm('https://x.com/Admin') !== norm('https://x.com/admin'), true);
-	eq('keeps query case', norm('https://x.com/?t=AbC') !== norm('https://x.com/?t=abc'), true);
-	// Fragment is the same page; a trailing slash is not meaningful here.
-	eq('drops the fragment', norm('https://x.com/a#section'), norm('https://x.com/a'));
-	eq('drops a trailing slash', norm('https://x.com/a/'), norm('https://x.com/a'));
-	eq('preserves the query', norm('https://x.com/a?b=1'), 'https://x.com/a?b=1');
-	// Opaque-origin schemes must keep their host (u.origin would collapse to "null").
-	eq('keeps opaque-scheme host distinct', norm('chrome://settings/') !== norm('chrome://extensions/'), true);
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

@@ -145,11 +145,6 @@
           "default": false,
           "description": "Restrict the bridge to tabs it opened itself. When on, tabs you opened (which the bridge otherwise adopts and can drive) are detached, and later calls on their tabId fail; browser_tab_open / browser_navigate still create bridge-owned tabs, so agents keep working. Works on every VS Code build. Off by default: without it, the bridge drives every browser tab in the window and VS Code's share/unshare does not affect it."
         },
-        "integratedBrowserMcp.lmPageDiscovery": {
-          "type": "boolean",
-          "default": false,
-          "description": "Use VS Code's built-in 'list_browser_pages' language model tool to discover integrated browser pages the bridge is not attached to. Requires VS Code 1.131+; ignored on older builds. Off by default."
-        },
         "integratedBrowserMcp.browserType": {
           "type": "string",
           "default": "editor-browser",

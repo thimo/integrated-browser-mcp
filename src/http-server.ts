@@ -5,9 +5,8 @@ import express from 'express';
 import type { CDPManager } from './cdp';
 import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
-import { discoverPages, isDiscoveryAvailable, isDiscoveryEnabled, type DiscoveredPage } from './lm-pages';
 import { hasProposedBrowserApi } from './cdp';
-import { isEnforcementEnabled, normalizeUrl, enforceSharing as runEnforceSharing } from './sharing';
+import { isEnforcementEnabled, enforceSharing as runEnforceSharing } from './sharing';
 import { decodePng, pixelAt } from './png';
 
 const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'allowAndName', 'deny', 'default']);
@@ -15,14 +14,13 @@ const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'all
 /**
  * Named cause + remedy for the degraded path, repeated verbatim in `/status`
  * and in every error raised while degraded. A silent fallback previously cost
- * an entire debugging session: shared pages never became attachable,
- * `browser_tab_open` failed with raw internal text, and discovery text claimed
- * pages "can be interacted with" when they could not — all of which read as
+ * an entire debugging session: pages the user opened never became attachable
+ * and `browser_tab_open` failed with raw internal text, which read as
  * extension bugs rather than one missing flag.
  */
 const DEGRADED_WARNING =
 	'DEGRADED: the `browser` API proposal is declared but not granted, so the bridge is on the debug-session fallback. '
-	+ 'Consequences: pages you did not open cannot be attached (no attachedTabId, even once shared), browser_tab_open is unavailable, '
+	+ 'Consequences: pages you did not open cannot be attached (even once shared in VS Code), browser_tab_open is unavailable, '
 	+ 'and each bridge tab shows a debug toolbar. '
 	+ 'Remedy: add "enable-proposed-api": ["thimo.integrated-browser-mcp"] to argv.json (Preferences: Configure Runtime Arguments) '
 	+ 'or launch with --enable-proposed-api thimo.integrated-browser-mcp, then fully restart VS Code.';
@@ -294,23 +292,6 @@ export class BridgeServer {
 		return { tab };
 	}
 
-	/**
-	 * Annotate VS Code-reported pages with the bridge tab serving the same URL,
-	 * so an agent can tell which discovered pages it can already drive. Matched
-	 * on normalized URL because page ids and tab ids come from different
-	 * namespaces and share no identifier.
-	 */
-	private linkToTabs(pages: DiscoveredPage[]): DiscoveredPage[] {
-		const byUrl = new Map<string, string>();
-		for (const tab of this.cdp.list()) {
-			if (tab.url) byUrl.set(normalizeUrl(tab.url), tab.tabId);
-		}
-		return pages.map(page => {
-			const tabId = page.url ? byUrl.get(normalizeUrl(page.url)) : undefined;
-			return tabId ? { ...page, attachedTabId: tabId } : page;
-		});
-	}
-
 	private setupRoutes(): void {
 		const existingTab = this.requireExistingTab();
 		const anyTabLazyNavigate = this.requireAnyTab(req => req.body?.url as string | undefined);
@@ -318,19 +299,8 @@ export class BridgeServer {
 		// Health / diagnostic
 		this.app.get('/status', async (_req, res) => {
 			// Report what this build can actually do *before* a tool has to find
-			// out by failing, and surface pages that exist but aren't attached —
-			// otherwise every field reads "nothing to act on" while a real,
-			// reachable page is sitting there.
+			// out by failing.
 			const proposedApi = hasProposedBrowserApi();
-			let attachablePages = 0;
-			if (isDiscoveryEnabled() && isDiscoveryAvailable()) {
-				try {
-					const discovery = await discoverPages(this.log);
-					attachablePages = discovery.pages.length;
-				} catch {
-					// Discovery is advisory; never let it break /status.
-				}
-			}
 			res.json({
 				ok: true,
 				data: {
@@ -350,13 +320,9 @@ export class BridgeServer {
 						multiTab: proposedApi,
 						reason: proposedApi ? undefined : DEGRADED_WARNING,
 					},
-					attachablePages,
 					// The bridge's access does not come from VS Code's sharing
 					// model and cannot be revoked by it: `BrowserTab` exposes no
-					// sharing state, so share/unshare is invisible here. Saying
-					// so explicitly matters because discovery *does* honour
-					// unshare, which makes the system look like it enforces
-					// something it does not.
+					// sharing state, so share/unshare is invisible here.
 					sharing: this.sharingStatus(),
 					transport: this.cdp.transport,
 					// The listening endpoint, so a user/agent can see whether the
@@ -373,10 +339,6 @@ export class BridgeServer {
 					networkBufferSize: this.cdp.network.length,
 					events: this.cdp.events,
 					emulatePath: this.emulatePath,
-					lmPageDiscovery: {
-						enabled: isDiscoveryEnabled(),
-						available: isDiscoveryAvailable(),
-					},
 				},
 			});
 		});
@@ -394,18 +356,6 @@ export class BridgeServer {
 					.map(info => this.cdp.getTab(info.tabId)?.refreshTitle().catch(() => undefined)),
 			);
 			res.json({ ok: true, data: this.cdp.list() });
-		});
-
-		// Integrated browser pages known to VS Code itself, including ones this
-		// bridge has not attached to. Requires VS Code 1.131+; degrades to
-		// `available: false` with a reason on older builds.
-		this.app.get('/pages', async (_req, res) => {
-			try {
-				const discovery = await discoverPages(this.log);
-				res.json({ ok: true, data: { ...discovery, pages: this.linkToTabs(discovery.pages) } });
-			} catch (err) {
-				res.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
-			}
 		});
 
 		this.app.post('/tab/open', async (req, res) => {

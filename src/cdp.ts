@@ -413,9 +413,8 @@ export class CDPManager {
 		// If it's a BrowserTab, close the VS Code tab too; lifecycle event will
 		// trigger untrack via onDidCloseBrowserTab. On the fallback path the
 		// tab is owned by a debug session — disconnecting CDP alone left the
-		// browser editor open, so the page stayed in VS Code (and in
-		// `list_browser_pages`' unshared count) despite us reporting it closed.
-		// Terminating the session is what actually closes it.
+		// browser editor open, so the page stayed in VS Code despite us
+		// reporting it closed. Terminating the session is what actually closes it.
 		const underlying = tab.browserTab;
 		const session = tab.debugSession;
 		await tab.disconnect();

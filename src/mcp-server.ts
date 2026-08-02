@@ -185,7 +185,7 @@ This MCP controls the integrated browser that runs inside VS Code itself — the
 
 Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (The number also appears in the tab title for tabs the bridge opened, per \`integratedBrowserMcp.tabIndicator\`; tabs the user opened are never marked.)
 
-If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs. In that mode discovery text from VS Code will claim shared pages "can be interacted with"; that is VS Code's copy and is not true here.
+If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs.
 
 Two very different setups, so check \`browser_status\` \`capabilities\` before planning:
 - **Proposed API granted** (\`capabilities.tabOpen: true\`) — full multi-tab. Open your own tab with \`browser_tab_open\`, pass its \`tabId\` everywhere, and don't touch tabs you didn't open.
@@ -202,7 +202,7 @@ Pick the cheapest tool for the job:
 
 \`browser_navigate\` replaces the current page of the target tab. If you want the previous page to stay accessible, use \`browser_tab_open\` instead.
 
-\`browser_tab_list\` shows the tabs this bridge drives. On VS Code 1.131+, \`browser_pages_discover\` additionally reports integrated browser pages VS Code knows about that the bridge is *not* attached to — use it when the user refers to a page that \`browser_tab_list\` doesn't show.
+\`browser_tab_list\` shows the tabs this bridge drives.
 
 Lazy-launch is the attach mechanism, not just a latency note: if no tab exists, \`browser_navigate\` (with no \`tabId\`) creates and connects one. That is how you go from "no tabs" to a drivable tab when \`browser_tab_open\` is unavailable — so an empty \`browser_tab_list\` does not mean the browser is unreachable. The first such call takes a second longer while the browser starts.
 `.trim();
@@ -553,7 +553,7 @@ server.tool(
 // Status
 server.tool(
 	'browser_status',
-	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode pages you did not open can never be attached or driven no matter what discovery says, and browser_tab_open is unavailable. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
+	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode pages you did not open can never be attached or driven, and browser_tab_open is unavailable. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/status')),
 );
@@ -585,17 +585,6 @@ server.tool(
 	'List every tab under the bridge. Returns an array of { tabId, number, url, title, active, state, transport }. The `number` matches the "(N) " prefix shown in each tab title — if the user says "reload browser 2", find the entry with number=2 and use its tabId. `number` is null for the 21st tab and beyond (their titles show 🤯 instead of a number); for those, refer to them by tabId or URL.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/tabs')),
-);
-
-// Page discovery via VS Code's own `list_browser_pages` LM tool (1.131+).
-// Complements browser_tab_list: that lists tabs the bridge drives, this lists
-// integrated browser pages VS Code knows about — including ones the bridge is
-// not attached to and cannot drive.
-server.tool(
-	'browser_pages_discover',
-	'Ask VS Code which integrated browser pages exist, including pages this bridge is NOT attached to (e.g. opened by the user, or by another VS Code window). Use when browser_tab_list looks empty or incomplete but the user insists a page is open. Returns { available, pages[], unsharedCount, hint }. Each page has a VS Code `pageId` (NOT a bridge tabId), plus `attachedTabId` when the bridge already drives that URL. IMPORTANT: a page WITHOUT `attachedTabId` is not a dead end — read the `hint` field, which says exactly how to act on it in this build. Typically: call browser_navigate with the page url and NO tabId, which lazy-launches the bridge\'s own tab at that URL (it does not take over the user\'s page). Check browser_status `capabilities` to know up front whether attaching to existing pages is possible. `available:false` means this VS Code build lacks the tool (needs 1.131+) — fall back to browser_tab_list.',
-	{},
-	async () => toMcpResult(await bridgeFetch('/pages')),
 );
 
 server.tool(
