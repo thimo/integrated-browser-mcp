@@ -102,6 +102,11 @@ const section = name => console.log(`\n${name}`);
 
 	const long = 'data:image/vnd.microsoft.icon;base64,' + 'A'.repeat(9000);
 	eq('drops the payload of an inlined favicon', compactIcon(long), 'data:image/vnd.microsoft.icon');
+	// The shape VS Code actually hands back: the separators are percent-encoded,
+	// so matching only literal `;` and `,` found neither and kept the whole blob.
+	const encoded = 'data:image/vnd.microsoft.icon%3Bbase64%2C' + 'A'.repeat(9000);
+	eq('percent-encoded separators', compactIcon(encoded), 'data:image/vnd.microsoft.icon');
+	eq('lowercase percent-encoding', compactIcon('data:image/png%3bbase64%2c' + 'A'.repeat(9000)), 'data:image/png');
 	eq('without a media type', compactIcon('data:;base64,' + 'A'.repeat(9000)), 'data:');
 	eq('no semicolon, only a comma', compactIcon('data:image/png,' + 'A'.repeat(9000)), 'data:image/png');
 	// A non-data URI that is somehow enormous still gets bounded.

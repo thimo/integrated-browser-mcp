@@ -124,8 +124,11 @@ const MAX_ICON_LENGTH = 256;
 export function compactIcon(icon: string | undefined): string | undefined {
 	if (!icon || icon.length <= MAX_ICON_LENGTH) return icon;
 	if (!icon.startsWith('data:')) return icon.slice(0, MAX_ICON_LENGTH);
-	// `data:<mediatype>[;base64],<payload>` — keep up to the media type.
-	const mediaType = icon.slice(5).split(/[;,]/, 1)[0];
+	// `data:<mediatype>[;base64],<payload>` — keep up to the media type. VS Code
+	// hands the URI back percent-encoded, so the separators arrive as `%3B` and
+	// `%2C`; matching only the literal characters found neither and returned the
+	// whole payload as the "media type".
+	const mediaType = icon.slice(5).split(/[;,]|%3B|%2C/i, 1)[0];
 	return mediaType ? `data:${mediaType}` : 'data:';
 }
 
