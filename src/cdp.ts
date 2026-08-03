@@ -7,9 +7,10 @@ export { CDPState, ConsoleEntry, NetworkEntry, DownloadEntry };
 export interface TabInfo {
 	tabId: string;
 	/**
-	 * 1-indexed number shown in the tab title for tabs the bridge opened.
-	 * `null` for tabs the user opened — those are never marked, so a number
-	 * would refer to something invisible. Freed and reused when a tab closes.
+	 * 1-indexed number shown in the tab title, assigned the first time an agent
+	 * acts on the tab. `null` for a tab no agent has touched — those are never
+	 * marked, so a number would refer to something invisible. Freed and reused
+	 * when a tab closes.
 	 */
 	number: number | null;
 	url: string;
@@ -68,8 +69,9 @@ export type TabIndicatorMode = 'off' | 'marker' | 'number';
  * Marking a tab means rewriting the page's real `document.title` through an
  * injected script — the only lever an extension has over the editor tab label
  * — so the page can observe it. That is acceptable on a tab the bridge opened
- * itself, and intrusive on one the user opened, which is why marking is scoped
- * to bridge-owned tabs (see {@link CDPManager.indicatorPrefixFor}).
+ * itself or has been asked to work in, and intrusive on one it has never
+ * touched, which is why marking follows agent activity (see
+ * {@link CDPManager.indicatorPrefixFor}).
  *
  *  - `number` — `(N) `, so a user can say "reload browser 2" and match it to
  *    `browser_tab_list`'s `number`.
@@ -132,15 +134,13 @@ export class CDPManager {
 	/**
 	 * The title prefix a tab should carry, or null for "leave the title alone".
 	 *
-	 * Only bridge-owned tabs are marked. The bridge attaches to *every*
-	 * integrated browser tab in the window, so marking on adoption stamped a
-	 * prefix onto pages the user had opened themselves — their title, their
-	 * page, mutated because an unrelated tool happened to be running. The tab
-	 * still gets a `number` in `browser_tab_list` either way; this only governs
-	 * what is written into the document.
+	 * Only tabs an agent has worked in are marked. The bridge attaches to
+	 * *every* integrated browser tab in the window, so marking on adoption
+	 * stamped a prefix onto pages the user had opened themselves — their title,
+	 * their page, mutated because an unrelated tool happened to be running.
 	 */
 	private indicatorPrefixFor(tab: CDPTab): string | null {
-		if (!tab.bridgeOwned) return null;
+		if (!tab.agentControlled) return null;
 		const mode = tabIndicatorMode();
 		if (mode === 'off') return null;
 		if (mode === 'marker') return tabIndicatorMarker();
@@ -183,6 +183,8 @@ export class CDPManager {
 			for (const other of this.tabs.values()) {
 				if (other !== tab && other.bridgeOwned && other.pageTargetId === openerId) {
 					tab.bridgeOwned = true;
+					// The agent's click opened it, so it counts as worked-in too.
+					tab.agentControlled = true;
 					if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
 					this.log.appendLine(`[Bridge] Tab ${tab.tabId} inherited ownership from opener ${openerId}`);
 					return;
@@ -199,21 +201,32 @@ export class CDPManager {
 		// without this the newly opened (visually focused) tab is not the active
 		// one, so later tabId-less calls drive the wrong page.
 		if (makeActive) this._activeTabId = tab.tabId;
-		if (!tab.bridgeOwned) {
-			tab.bridgeOwned = true;
-			// Adopted before ownership was known, so it has no number yet.
-			if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
-			const prefix = this.indicatorPrefixFor(tab);
-			if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
-		}
+		tab.bridgeOwned = true;
+		// Opening a tab is itself an agent action, so it starts out controlled.
+		await this.noteAgentControl(tab);
 		if (makeActive) this.emitStateChange();
 		return tab;
 	}
 
 	/**
-	 * Lowest unused number, so closing a tab frees its slot for the next one:
-	 * with 1 and 2 open, closing 1 means the next tab is 1 again rather than 3.
-	 * Only bridge-owned tabs hold a number, so the sequence has no invisible gaps.
+	 * Record that an agent is working in this tab, numbering and marking it if
+	 * it was not already. Called for every action that can move the page — not
+	 * for reads, which leave no trace and so warrant no marker.
+	 */
+	async noteAgentControl(tab: CDPTab): Promise<void> {
+		if (tab.agentControlled) return;
+		tab.agentControlled = true;
+		if (tab.displayNumber === null) tab.displayNumber = this.allocateNumber();
+		this.log.appendLine(`[Bridge] Claiming ${tab.tabId} as number ${tab.displayNumber} (${tab.url})`);
+		const prefix = this.indicatorPrefixFor(tab);
+		if (prefix) await tab.setTitlePrefix(prefix, this.ownerId);
+		this.emitStateChange();
+	}
+
+	/**
+	 * Lowest unused number, so releasing a tab frees its slot for the next one:
+	 * with 1 and 2 held, losing 1 means the next tab is 1 again rather than 3.
+	 * Only controlled tabs hold a number, so the sequence has no invisible gaps.
 	 */
 	private allocateNumber(): number {
 		const used = new Set<number>();
@@ -355,11 +368,14 @@ export class CDPManager {
 		const promise = (async () => {
 			const tab = new CDPTab(generateTabId(), this.log);
 			tab.bridgeOwned = bridgeOwned;
-			// Only the bridge's own tabs are numbered. Numbering everything
-			// meant the user's tabs silently consumed 1 and 2 while showing no
-			// prefix, so the agent's first tab appeared as "(3)" — a number the
-			// user cannot see the origin of, with no visible 1 or 2 to match.
-			tab.displayNumber = bridgeOwned ? this.allocateNumber() : null;
+			// Numbers track agent activity, not adoption: a tab sitting in the
+			// window that no agent has touched shows nothing, so every visible
+			// number belongs to a tab an agent is actually working in. A
+			// bridge-opened tab qualifies at once — opening it was the action.
+			if (bridgeOwned) {
+				tab.agentControlled = true;
+				tab.displayNumber = this.allocateNumber();
+			}
 			this.registerTab(tab);
 			await tab.connectToBrowserTab(browserTab);
 
@@ -399,6 +415,7 @@ export class CDPManager {
 		// it is bridge-owned — otherwise enforcement would revoke it
 		// immediately and leave the extension with nothing to drive.
 		tab.bridgeOwned = true;
+		tab.agentControlled = true;
 		tab.displayNumber = 1;
 		this.registerTab(tab);
 		await tab.connectToSession(session);

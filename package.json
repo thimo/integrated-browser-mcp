@@ -2,7 +2,7 @@
   "name": "integrated-browser-mcp",
   "displayName": "Integrated Browser MCP",
   "description": "Exposes VS Code's integrated browser to external agents (Claude Code, scripts, curl) via a local HTTP API and MCP server.",
-  "version": "0.6.1",
+  "version": "0.7.0-pr1",
   "publisher": "thimo",
   "license": "MIT",
   "author": {
@@ -123,7 +123,7 @@
             "Prefix a fixed symbol — no ordering implied",
             "Never modify tab titles"
           ],
-          "description": "How to mark tabs under agent control. Only tabs the bridge opened are marked; marking rewrites the page's document.title."
+          "description": "How to mark tabs an agent has worked in. A tab is marked the first time an agent acts on it; marking rewrites the page's document.title."
         },
         "integratedBrowserMcp.tabIndicatorMarker": {
           "order": 6,

@@ -183,7 +183,7 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 const SERVER_INSTRUCTIONS = `
 This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
 
-Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. (The number also appears in the tab title for tabs the bridge opened, per \`integratedBrowserMcp.tabIndicator\`; tabs the user opened are never marked.)
+Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. A tab gets its number the moment you act on it and shows it in the tab title (per \`integratedBrowserMcp.tabIndicator\`), so the user can see which tabs you have worked in. It keeps that number for as long as it stays open. Reading a page does not claim one.
 
 If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs.
 
@@ -584,7 +584,7 @@ server.tool(
 
 server.tool(
 	'browser_tab_list',
-	'List every tab under the bridge. Returns an array of { tabId, number, url, title, active, state, transport }. The `number` matches the "(N) " prefix shown in each tab title — if the user says "reload browser 2", find the entry with number=2 and use its tabId. `number` is null for the 21st tab and beyond (their titles show 🤯 instead of a number); for those, refer to them by tabId or URL.',
+	'List every tab under the bridge. Returns an array of { tabId, number, url, title, active, state, transport }. The `number` matches the "(N) " prefix shown in each tab title — if the user says "reload browser 2", find the entry with number=2 and use its tabId. A tab is numbered once you act on it, and keeps that number until it closes. `number` is null for a tab you have not acted on, and for the 21st tab onward (their titles show 🤯 instead of a number); refer to those by tabId or URL.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/tabs')),
 );

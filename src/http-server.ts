@@ -301,6 +301,26 @@ export class BridgeServer {
 		return `Tab ${tabId} is no longer accessible: ${revoked}. Sharing the page in VS Code does not restore access — either work in your own tab (browser_tab_open, or browser_navigate with no tabId), or ask the user to enable integratedBrowserMcp.allowAllExistingTabs.`;
 	}
 
+	/**
+	 * Middleware for endpoints that can move the page: records that an agent is
+	 * working in the target tab, which is what numbers and marks it. Chained
+	 * after the tab guards, so the tab is known to exist and be permitted.
+	 * Deliberately not applied to reads — looking at a page is not working in
+	 * it, and a marker that appears from a screenshot would be noise.
+	 */
+	private notesControl(): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
+		return (req, _res, next) => {
+			const { tab } = this.resolveTab(req);
+			if (!tab) {
+				next();
+				return;
+			}
+			this.cdp.noteAgentControl(tab)
+				.catch(err => this.log.appendLine(`[Bridge] Could not mark ${tab.tabId}: ${err}`))
+				.then(() => next());
+		};
+	}
+
 	/** Resolve the target tab for a request (query `?tabId=` or body `tabId`). */
 	private resolveTab(req: express.Request): { tab?: CDPTab; error?: string } {
 		const tabId = (req.query.tabId as string | undefined) ?? (req.body?.tabId as string | undefined);
@@ -319,6 +339,8 @@ export class BridgeServer {
 	private setupRoutes(): void {
 		const existingTab = this.requireExistingTab();
 		const anyTabLazyNavigate = this.requireAnyTab(req => req.body?.url as string | undefined);
+		// Endpoints that can move the page also claim the tab (number + marker).
+		const controls = this.notesControl();
 
 		// Health / diagnostic
 		this.app.get('/status', async (_req, res) => {
@@ -419,7 +441,7 @@ export class BridgeServer {
 		}));
 
 		// Navigation
-		this.app.post('/navigate', anyTabLazyNavigate, async (req, res) => {
+		this.app.post('/navigate', anyTabLazyNavigate, controls, async (req, res) => {
 			try {
 				const { url } = req.body;
 				if (!url) {
@@ -442,7 +464,7 @@ export class BridgeServer {
 		});
 
 		// Eval
-		this.app.post('/eval', existingTab, async (req, res) => {
+		this.app.post('/eval', existingTab, controls, async (req, res) => {
 			try {
 				const { expression } = req.body;
 				if (!expression) {
@@ -467,7 +489,7 @@ export class BridgeServer {
 		});
 
 		// Click
-		this.app.post('/click', existingTab, async (req, res) => {
+		this.app.post('/click', existingTab, controls, async (req, res) => {
 			try {
 				const { selector } = req.body;
 				if (!selector) {
@@ -500,7 +522,7 @@ export class BridgeServer {
 		});
 
 		// Type
-		this.app.post('/type', existingTab, async (req, res) => {
+		this.app.post('/type', existingTab, controls, async (req, res) => {
 			try {
 				const { selector, text, submit } = req.body;
 				if (!selector || text === undefined) {
@@ -543,7 +565,7 @@ export class BridgeServer {
 		});
 
 		// Scroll
-		this.app.post('/scroll', existingTab, async (req, res) => {
+		this.app.post('/scroll', existingTab, controls, async (req, res) => {
 			try {
 				const deltaX = Number(req.body.deltaX) || 0;
 				const deltaY = Number(req.body.deltaY) || 0;
@@ -701,7 +723,7 @@ export class BridgeServer {
 		// with whichever side gets fixed first. `/status` exposes which
 		// path won most recently for debugging. `Emulation.clearDevice-
 		// MetricsOverride` clears either override, so reset is one call.
-		this.app.post('/emulate', existingTab, async (req, res) => {
+		this.app.post('/emulate', existingTab, controls, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }
@@ -1022,7 +1044,7 @@ export class BridgeServer {
 		// the workspace happens in the MCP layer (browser_download_set);
 		// callers hitting this endpoint directly (curl, scripts) pass an
 		// absolute path and own the consequences.
-		this.app.post('/download/set', existingTab, async (req, res) => {
+		this.app.post('/download/set', existingTab, controls, async (req, res) => {
 			try {
 				const resolved = this.resolveTab(req);
 				if (!resolved.tab) { res.json({ ok: false, error: resolved.error }); return; }

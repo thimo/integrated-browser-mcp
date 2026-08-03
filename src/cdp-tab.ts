@@ -243,10 +243,25 @@ export class CDPTab {
 
 	/**
 	 * True when the bridge itself opened this tab (vs. adopting one the user
-	 * already had). Sharing enforcement only applies to the user's own pages —
-	 * a tab the bridge created is its own and is never revoked.
+	 * already had). Governs **access**: enforcement only revokes the user's own
+	 * pages, never a tab the bridge created.
 	 */
 	bridgeOwned = false;
+
+	/**
+	 * True when an agent has worked in this tab. Governs the **number and
+	 * marker**, which answer a different question than {@link bridgeOwned}
+	 * does: not "who opened this" but "where has the agent been". Set the first
+	 * time an agent acts on the tab and kept for the tab's lifetime.
+	 *
+	 * Deliberately not released when the user navigates the tab themselves.
+	 * That was tried and reverted: the number is an *address* — the user says
+	 * "reload browser 2" — so letting their own interaction dissolve it takes
+	 * the label away exactly when it is being used. It also made a visible
+	 * label depend on guessing who caused a navigation, which CDP does not
+	 * report; the marker moved for reasons neither side could see.
+	 */
+	agentControlled = false;
 
 	/**
 	 * Read `document.title` out of the page and cache it.

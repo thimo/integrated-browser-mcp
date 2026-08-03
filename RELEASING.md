@@ -8,6 +8,12 @@ How to cut a release of `integrated-browser-mcp`.
 - **Minor** `0.x.0` — new MCP tools or HTTP endpoints, new options on existing ones
 - **Major** `x.0.0` — breaking changes to the MCP tool surface or HTTP API
 
+### Preview builds
+
+A `.vsix` built for testing before a release is versioned `<next>-prN` — `0.7.0-pr1`, `-pr2`, and so on. It shows up as such in the extensions list, so there is never any doubt which build a window is running. Install it with `code --install-extension <file>.vsix --force`.
+
+Local only. The Marketplace does not accept semver pre-release tags ("We only support `major.minor.patch`"), so `vsce publish` will reject a `-prN` version — which is the point. `release.sh` writes the version it is given, so a preview version in `package.json` never leaks into a real release.
+
 ## One-time setup
 
 - VS Code Marketplace personal access token, stored locally so `vsce publish` can authenticate. See [the vsce docs](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#get-a-personal-access-token).
