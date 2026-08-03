@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { CDPManager } from './cdp';
-import { enforceSharing } from './sharing';
+import { enforceTabAccess } from './sharing';
 
 /**
  * Expose the bridge's *distinctive* capabilities to VS Code's own agent via
@@ -58,10 +58,10 @@ export function registerLanguageModelTools(
 						if (!manager) {
 							return textResult('The Integrated Browser MCP bridge is not running. Start it with "Integrated Browser MCP: Start".');
 						}
-						// Honour enforceSharing here too: without this, Copilot could
-						// keep reading an unshared user tab's buffers/list via these
-						// tools while the HTTP layer revoked it.
-						await enforceSharing(manager).catch(err => log.appendLine(`[LM] enforcement failed: ${err}`));
+						// Honour the same access model here: without this, Copilot could
+						// keep reading a user tab's buffers/list via these tools while
+						// the HTTP layer revoked it.
+						await enforceTabAccess(manager).catch(err => log.appendLine(`[LM] enforcement failed: ${err}`));
 						return textResult(handler(options.input ?? {}));
 					},
 				}),

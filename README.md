@@ -193,7 +193,7 @@ Multi-tab support requires the proposed API (previous section). When enabled:
 
 The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. The bridge strips any prefix a prior version of the extension may have left on a pre-existing tab, so you won't see stacked markers after an upgrade.
 
-**Only tabs the bridge opened itself are numbered and marked** — pages you open yourself are adopted (and drivable) but their titles are never touched, and their `number` is `null`. `integratedBrowserMcp.tabIndicator` tunes the marking: `number` (default), `marker` (a fixed symbol via `integratedBrowserMcp.tabIndicatorText`, no ordering implied), or `off`. The prefix rewrites the page's real `document.title`, so the page can observe it — choose `off` if a page or tool needs the unmodified title.
+**Only tabs the bridge opened itself are numbered and marked** — pages you open yourself are not driven at all by default (see [Limitations and trust model](#limitations-and-trust-model)), and their titles are never touched. With `integratedBrowserMcp.allowAllExistingTabs` on they become drivable, but stay unmarked and keep `number: null`. `integratedBrowserMcp.tabIndicator` tunes the marking: `number` (default), `marker` (a fixed symbol via `integratedBrowserMcp.tabIndicatorText`, no ordering implied), or `off`. The prefix rewrites the page's real `document.title`, so the page can observe it — choose `off` if a page or tool needs the unmodified title.
 
 On the debug-session fallback path, the bridge always exposes exactly one tab (synthetic id `tab-main`) and `browser_tab_open` returns an error pointing to the proposed API.
 
@@ -220,6 +220,7 @@ Caveats:
 
 - The bridge listens on a unix socket / named pipe with owner-only permissions by default — nothing is bound to a network interface, no port to scan, and other local users can't connect. On `integratedBrowserMcp.transport: "tcp"` it binds `127.0.0.1` only, with no authentication — reachable by any local process, same trust model as VS Code's built-in terminals.
 - `/eval` runs arbitrary JavaScript in the open page — same trust model as the DevTools console. Don't pass untrusted input.
-- VS Code's page-sharing toggle does not govern this bridge by default: it drives every tab it can attach to. The opt-in `integratedBrowserMcp.enforceSharing` setting restricts the bridge to tabs it opened itself — adopted user tabs are detached, and `browser_tab_open` / `browser_navigate` create bridge-owned tabs. Works on every VS Code build.
+- **Agents can only drive tabs the bridge opened.** Tabs you open yourself are detached and never reach an agent, so installing this does not expose whatever you already had open in the integrated browser. Set `integratedBrowserMcp.allowAllExistingTabs` to `true` when you *do* want an agent to work in your own tabs. Works on every VS Code build.
+- VS Code's page-sharing toggle does not govern this bridge in either mode. Sharing is Copilot's consent gate for its own tools; the proposed `browser` API exposes no sharing state, so share/unshare is invisible here. Revoke by closing the tab or stopping the bridge.
 - On the debug-session path (default, no proposed-API flag): only one tab, web worker and service worker events not captured, and the debug toolbar / "(1)" badge appears while the browser is active.
 - The browser tab lives in the VS Code editor area. Moving it to a side panel is fine; closing it disconnects CDP.

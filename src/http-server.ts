@@ -6,7 +6,7 @@ import type { CDPManager } from './cdp';
 import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
 import { hasProposedBrowserApi } from './cdp';
-import { isEnforcementEnabled, enforceSharing as runEnforceSharing } from './sharing';
+import { allowsAllExistingTabs, enforceTabAccess as runEnforceTabAccess } from './sharing';
 import { decodePng, pixelAt } from './png';
 
 const DOWNLOAD_BEHAVIORS: ReadonlySet<DownloadBehavior> = new Set(['allow', 'allowAndName', 'deny', 'default']);
@@ -172,7 +172,7 @@ export class BridgeServer {
 				// Enforce before creating or touching anything: /navigate is the
 				// most impactful verb, so leaving it unguarded let a caller keep
 				// driving a just-unshared tab simply by avoiding other endpoints.
-				await this.enforceSharing().catch(() => undefined);
+				await this.enforceTabAccess().catch(() => undefined);
 				if (this.cdp.tabCount === 0 && this.ensureBrowser) {
 					this.log.appendLine('[HTTP] No tabs, launching browser...');
 					await this.ensureBrowser(lazyUrl?.(req));
@@ -203,8 +203,8 @@ export class BridgeServer {
 	 */
 	private requireExistingTab(): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
 		return (_req, res, next) => {
-			this.enforceSharing()
-				.catch(err => this.log.appendLine(`[Bridge] Sharing enforcement failed: ${err}`))
+			this.enforceTabAccess()
+				.catch(err => this.log.appendLine(`[Bridge] Tab access enforcement failed: ${err}`))
 				.then(() => this.afterEnforcement(res, next));
 		};
 	}
@@ -233,29 +233,29 @@ export class BridgeServer {
 	}
 
 	/**
-	 * Detach from any user-owned tab whose page is no longer shared, when
-	 * `integratedBrowserMcp.enforceSharing` is on. Runs before tab-targeted work so a
-	 * revoked page cannot be driven through a `tabId` captured earlier.
+	 * Detach from every tab the bridge did not open, unless
+	 * `integratedBrowserMcp.allowAllExistingTabs` is on. Runs before tab-targeted
+	 * work so a tab cannot be driven through a `tabId` captured earlier.
 	 */
-	private enforceSharing(): Promise<void> {
+	private enforceTabAccess(): Promise<void> {
 		// Delegates to the shared implementation so the language-model tools
 		// honour the same access model (they previously bypassed it entirely).
-		return runEnforceSharing(this.cdp);
+		return runEnforceTabAccess(this.cdp);
 	}
 
 	/** Report the access model plainly, without overstating what it guarantees. */
-	private sharingStatus(): Record<string, unknown> {
-		if (!isEnforcementEnabled()) {
+	private tabAccessStatus(): Record<string, unknown> {
+		if (!allowsAllExistingTabs()) {
 			return {
-				enforced: false,
-				mode: 'off',
-				note: 'Unsharing a page in VS Code does NOT detach this bridge. Sharing is Copilot\'s consent gate for its own tools; this bridge attaches over CDP to every browser tab in the window, and the proposed API exposes no sharing state. To actually revoke access: close the tab, or stop the bridge (Integrated Browser MCP: Stop). Set integratedBrowserMcp.enforceSharing to restrict the bridge to tabs it opened itself.',
+				allowAllExistingTabs: false,
+				mode: 'bridge-owned-only',
+				note: 'Default: the bridge drives ONLY tabs it opened itself. Tabs you opened are detached and calls on their tabId fail; browser_tab_open / browser_navigate create bridge-owned tabs, so agents still work. Set integratedBrowserMcp.allowAllExistingTabs to true to let agents drive tabs you opened.',
 			};
 		}
 		return {
-			enforced: true,
-			mode: 'bridge-owned-only',
-			note: 'integratedBrowserMcp.enforceSharing is on: the bridge drives ONLY tabs it opened itself; adopted user tabs are detached and later calls on their tabId fail. browser_tab_open / browser_navigate create bridge-owned tabs, so agents still work.',
+			allowAllExistingTabs: true,
+			mode: 'all-tabs',
+			note: 'integratedBrowserMcp.allowAllExistingTabs is on: the bridge drives every browser tab in this window, including ones you opened. VS Code\'s share/unshare does NOT affect this — sharing is Copilot\'s consent gate for its own tools, and the proposed API exposes no sharing state here. To revoke access: close the tab, turn this setting off, or stop the bridge (Integrated Browser MCP: Stop).',
 		};
 	}
 
@@ -268,8 +268,8 @@ export class BridgeServer {
 		handler: (req: express.Request, res: express.Response) => void | Promise<void>,
 	): (req: express.Request, res: express.Response) => void {
 		return (req, res) => {
-			this.enforceSharing()
-				.catch(err => this.log.appendLine(`[Bridge] Sharing enforcement failed: ${err}`))
+			this.enforceTabAccess()
+				.catch(err => this.log.appendLine(`[Bridge] Tab access enforcement failed: ${err}`))
 				.then(() => handler(req, res))
 				.catch(err => res.json({ ok: false, error: String(err instanceof Error ? err.message : err) }));
 		};
@@ -281,11 +281,11 @@ export class BridgeServer {
 		const tab = this.cdp.getTab(tabId);
 		if (!tab) {
 			// Distinguish "revoked" from "never existed": an agent holding a
-			// tabId from before an unshare needs to know its access was
+			// tabId from before enforcement ran needs to know its access was
 			// withdrawn, not that it mistyped an id.
 			const revoked = tabId ? this.cdp.revokedReason(tabId) : undefined;
 			if (revoked) {
-				return { error: `Tab ${tabId} is no longer accessible: ${revoked}. The user unshared this page; ask them to share it again if you still need it.` };
+				return { error: `Tab ${tabId} is no longer accessible: ${revoked}. Sharing the page in VS Code does NOT restore access. Either work in your own tab (browser_tab_open, or browser_navigate with no tabId), or ask the user to enable integratedBrowserMcp.allowAllExistingTabs.` };
 			}
 			return { error: tabId ? `No tab with id ${tabId}` : 'No active tab. Use browser_tab_open first.' };
 		}
@@ -323,7 +323,7 @@ export class BridgeServer {
 					// The bridge's access does not come from VS Code's sharing
 					// model and cannot be revoked by it: `BrowserTab` exposes no
 					// sharing state, so share/unshare is invisible here.
-					sharing: this.sharingStatus(),
+					tabAccess: this.tabAccessStatus(),
 					transport: this.cdp.transport,
 					// The listening endpoint, so a user/agent can see whether the
 					// bridge is on a socket or fell back to a TCP port (the `auto`
@@ -347,7 +347,7 @@ export class BridgeServer {
 		this.app.get('/tabs', async (_req, res) => {
 			// Enforce first: a revoked tab must not be listed, because listing
 			// it is how an agent re-acquires a tabId it should no longer have.
-			await this.enforceSharing().catch(() => undefined);
+			await this.enforceTabAccess().catch(() => undefined);
 			// Backfill titles the websocket path never populates, so tabs don't
 			// come back as untitled. Best-effort and bounded to connected tabs.
 			await Promise.all(

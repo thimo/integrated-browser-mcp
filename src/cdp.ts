@@ -330,8 +330,8 @@ export class CDPManager {
 		// `onDidOpenBrowserTab` fires for tabs we open ourselves and calls this
 		// without `bridgeOwned`, so whichever call arrives first decides — and
 		// the event usually wins. A tab the bridge opened would then be recorded
-		// as the user's: no indicator, and under `enforceSharing` it would be
-		// revoked as an unshared page the bridge had no business driving.
+		// as the user's: no indicator, and it would be revoked as a page the
+		// bridge had no business driving.
 		const pending = this.pendingAdoptions.get(browserTab);
 		if (pending) return bridgeOwned ? pending.then(tab => this.claimOwnership(tab, makeActive)) : pending;
 		for (const tab of this.tabs.values()) {
@@ -358,7 +358,7 @@ export class CDPManager {
 
 			// A tab opened FROM a bridge-owned tab (window.open, target=_blank,
 			// "open in new tab") inherits ownership: it belongs to the agent's
-			// working set, so number it and keep it drivable under enforceSharing.
+			// working set, so number it and keep it drivable.
 			if (!bridgeOwned) await this.inheritOwnershipFromOpener(tab);
 
 			const prefix = this.indicatorPrefixFor(tab);
@@ -381,7 +381,7 @@ export class CDPManager {
 		if (existing) return existing;
 		const tab = new CDPTab('tab-main', this.log);
 		// The fallback path's single tab is launched by the bridge itself, so
-		// it is bridge-owned — otherwise sharing enforcement would revoke it
+		// it is bridge-owned — otherwise enforcement would revoke it
 		// immediately and leave the extension with nothing to drive.
 		tab.bridgeOwned = true;
 		tab.displayNumber = 1;
@@ -440,7 +440,7 @@ export class CDPManager {
 	 */
 	private revoked = new Map<string, { url: string; reason: string; at: number }>();
 
-	/** Cap on remembered revocations, so enforceSharing churn can't grow the map without bound. */
+	/** Cap on remembered revocations, so enforcement churn can't grow the map without bound. */
 	private static readonly MAX_REVOKED = 100;
 
 	revokedReason(tabId: string): string | undefined {
@@ -465,7 +465,7 @@ export class CDPManager {
 			this._activeTabId = this.tabs.size > 0 ? this.tabs.keys().next().value ?? null : null;
 		}
 		this.revoked.set(tabId, { url, reason, at: Date.now() });
-		// FIFO-evict the oldest so a long session under enforceSharing (every
+		// FIFO-evict the oldest so a long session under enforcement (every
 		// user tab adopted then revoked) can't grow this without bound.
 		while (this.revoked.size > CDPManager.MAX_REVOKED) {
 			const oldest = this.revoked.keys().next().value;

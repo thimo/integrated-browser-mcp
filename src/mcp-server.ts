@@ -187,9 +187,11 @@ Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When th
 
 If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs.
 
+By default you can only see and drive tabs this bridge opened — tabs the user opened themselves are detached and never appear in \`browser_tab_list\`. That is deliberate, not a fault: opening a page in the integrated browser does not hand it to an agent. If the user asks you to look at a page they already have open, you have two honest answers: open it yourself with \`browser_tab_open\` / \`browser_navigate\` (same browser, same cookies and localhost routing, but a fresh load — so form input, scroll position and post-login state are not carried over), or tell them to enable \`integratedBrowserMcp.allowAllExistingTabs\`, after which their tabs become drivable. \`browser_status\` \`tabAccess\` reports which mode is active.
+
 Two very different setups, so check \`browser_status\` \`capabilities\` before planning:
-- **Proposed API granted** (\`capabilities.tabOpen: true\`) — full multi-tab. Open your own tab with \`browser_tab_open\`, pass its \`tabId\` everywhere, and don't touch tabs you didn't open.
-- **Not granted** (the default for a normally-installed build) — \`browser_tab_open\` fails and the bridge cannot attach to a page the user already opened. The only way to get a working tab is \`browser_navigate\` with **no** \`tabId\`: the bridge lazy-launches its own single tab and navigates it. This opens a separate page rather than taking over the user's, so it is not hijacking — but confirm with the user first if a page is already open, since the bridge tab is the only one you can drive.
+- **Proposed API granted** (\`capabilities.tabOpen: true\`) — full multi-tab. Open your own tab with \`browser_tab_open\` and pass its \`tabId\` everywhere.
+- **Not granted** (the default for a normally-installed build) — \`browser_tab_open\` fails and the bridge cannot attach to a page the user already opened at all, whatever \`allowAllExistingTabs\` says. The only way to get a working tab is \`browser_navigate\` with **no** \`tabId\`: the bridge lazy-launches its own single tab and navigates it. This opens a separate page rather than taking over the user's, so it is not hijacking — but confirm with the user first if a page is already open, since the bridge tab is the only one you can drive.
 
 Target a specific tab by passing \`tabId\` (from \`browser_tab_list\` or \`browser_tab_open\`) to any interaction tool. Omit \`tabId\` to use the active tab.
 
@@ -553,7 +555,7 @@ server.tool(
 // Status
 server.tool(
 	'browser_status',
-	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode pages you did not open can never be attached or driven, and browser_tab_open is unavailable. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
+	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode pages you did not open can never be attached or driven, and browser_tab_open is unavailable. Also returns `tabAccess`, which says whether you may drive tabs the user opened (`allowAllExistingTabs`, off by default) — check it before telling a user why their page is not in browser_tab_list. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/status')),
 );

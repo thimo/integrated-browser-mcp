@@ -140,10 +140,10 @@
           ],
           "description": "Symbol shown on tabs the agent controls when integratedBrowserMcp.tabIndicator is 'marker'. A trailing space is added automatically. Emoji options render in colour on Windows and macOS but can appear as a placeholder box on systems without an emoji font."
         },
-        "integratedBrowserMcp.enforceSharing": {
+        "integratedBrowserMcp.allowAllExistingTabs": {
           "type": "boolean",
           "default": false,
-          "description": "Restrict the bridge to tabs it opened itself. When on, tabs you opened (which the bridge otherwise adopts and can drive) are detached, and later calls on their tabId fail; browser_tab_open / browser_navigate still create bridge-owned tabs, so agents keep working. Works on every VS Code build. Off by default: without it, the bridge drives every browser tab in the window and VS Code's share/unshare does not affect it."
+          "description": "Let agents drive browser tabs you opened yourself, not just the ones the bridge opened. Off by default: agents can only see and drive their own tabs, and calls on one of your tabs fail — browser_tab_open / browser_navigate keep working, so agents are not blocked. Turn this on if you want an agent to inspect a page you already have open. Note that VS Code's share/unshare does not govern this bridge either way: sharing is Copilot's consent gate for its own tools, and the proposed browser API exposes no sharing state here."
         },
         "integratedBrowserMcp.browserType": {
           "type": "string",
@@ -157,6 +157,10 @@
             "External Chrome window (more reliable CDP support)"
           ],
           "description": "Which browser type to launch for automation"
+        },
+        "integratedBrowserMcp.enforceSharing": {
+          "type": "boolean",
+          "deprecationMessage": "Replaced by integratedBrowserMcp.allowAllExistingTabs, which expresses the same choice the other way round (enforceSharing: true is now the default). Your existing value still takes effect — an explicit false is read as allowAllExistingTabs: true — but move it to the new key; this one will be removed in a future release."
         },
         "browserBridge.httpPort": {
           "type": "number",
