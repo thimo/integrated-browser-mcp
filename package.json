@@ -82,6 +82,7 @@
       "title": "Integrated Browser MCP",
       "properties": {
         "integratedBrowserMcp.transport": {
+          "order": 3,
           "type": "string",
           "default": "auto",
           "enum": [
@@ -97,16 +98,19 @@
           "description": "How external agents reach the bridge. The default opens no listening port."
         },
         "integratedBrowserMcp.httpPort": {
+          "order": 4,
           "type": "number",
           "default": 3788,
           "description": "TCP port, used only when Transport resolves to tcp."
         },
         "integratedBrowserMcp.autoStart": {
+          "order": 2,
           "type": "boolean",
           "default": true,
           "description": "Automatically start the bridge when VS Code opens"
         },
         "integratedBrowserMcp.tabIndicator": {
+          "order": 5,
           "type": "string",
           "default": "number",
           "enum": [
@@ -122,6 +126,7 @@
           "description": "How to mark tabs under agent control. Only tabs the bridge opened are marked; marking rewrites the page's document.title."
         },
         "integratedBrowserMcp.tabIndicatorMarker": {
+          "order": 6,
           "type": "string",
           "default": "●",
           "enum": [
@@ -141,11 +146,13 @@
           "description": "Symbol used when Tab Indicator is 'marker'. Emoji need an emoji font to render."
         },
         "integratedBrowserMcp.allowAllExistingTabs": {
+          "order": 1,
           "type": "boolean",
           "default": false,
           "markdownDescription": "Let agents drive browser tabs you opened yourself, not just the ones the bridge opened. [What this affects](https://github.com/thimo/vscode-integrated-browser-mcp#limitations-and-trust-model)"
         },
         "integratedBrowserMcp.browserType": {
+          "order": 7,
           "type": "string",
           "default": "editor-browser",
           "enum": [
