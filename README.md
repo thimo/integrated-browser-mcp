@@ -191,7 +191,7 @@ Multi-tab support requires the proposed API (previous section). When enabled:
 - `browser_console` and `browser_network` aggregate across all tabs by default — each entry carries the `tabId` of the tab it came from. Pass `tabId` to filter.
 - Closing a tab in the VS Code UI is picked up automatically; the bridge untracks it and the `tabId` becomes invalid.
 
-The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. The bridge strips any prefix a prior version of the extension may have left on a pre-existing tab, so you won't see stacked markers after an upgrade.
+The `(N) ` prefix is auto-applied even to pages without a `<title>` element (about:blank, raw API responses), and it re-applies after navigation. It lasts only as long as the bridge runs — stop it and the next page load is clean.
 
 **Only tabs the bridge opened itself are numbered and marked** — pages you open yourself are not driven at all by default (see [Limitations and trust model](#limitations-and-trust-model)), and their titles are never touched. With `integratedBrowserMcp.allowAllExistingTabs` on they become drivable, but stay unmarked and keep `number: null`. `integratedBrowserMcp.tabIndicator` tunes the marking: `number` (default), `marker` (a fixed symbol via `integratedBrowserMcp.tabIndicatorText`, no ordering implied), or `off`. The prefix rewrites the page's real `document.title`, so the page can observe it — choose `off` if a page or tool needs the unmodified title.
 

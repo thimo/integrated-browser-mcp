@@ -566,7 +566,26 @@ export class CDPTab {
 		}
 	}
 
-	private titleScriptId: string | null = null;
+	/**
+	 * The prefix is re-applied per document instead of being registered with
+	 * `Page.addScriptToEvaluateOnNewDocument`. Those registrations outlive the
+	 * CDP session that created them: after an ungraceful shutdown (window
+	 * reload, extension update, crash) the orphaned script kept re-marking
+	 * every page the tab visited, and no later instance could remove it —
+	 * `Page.removeScriptToEvaluateOnNewDocument` needs the identifier from the
+	 * session that is gone. Evaluating per navigation costs a brief unprefixed
+	 * title and leaves nothing behind when this instance dies.
+	 */
+	private reapplyTitlePrefix = (): void => {
+		if (!this.currentTitlePrefix) return;
+		const script = this.buildTitleScript(this.currentTitlePrefix, this.titleOwnerId);
+		this.send('Runtime.evaluate', { expression: script }).catch(() => {
+			// The context may not be ready yet; the next navigation event retries.
+		});
+	};
+
+	/** Owner id to stamp into the injected script, kept for re-application. */
+	private titleOwnerId: string | null = null;
 	private currentTitlePrefix: string | null = null;
 
 	/**
@@ -855,22 +874,13 @@ export class CDPTab {
 		if (this.currentTitlePrefix) await this.removeTitlePrefix();
 		const script = this.buildTitleScript(prefix, ownerId ?? null);
 		try {
-			// Remove prior on-new-document script (if any) before adding the new one.
-			if (this.titleScriptId) {
-				await this.send('Page.removeScriptToEvaluateOnNewDocument', {
-					identifier: this.titleScriptId,
-				}).catch(() => {});
-				this.titleScriptId = null;
-			}
-			const result = await this.send('Page.addScriptToEvaluateOnNewDocument', {
-				source: script,
-			}) as { identifier: string };
-			this.titleScriptId = result.identifier;
-			// Apply to the current document.
 			await this.send('Runtime.evaluate', { expression: script });
-			// Record the successful prefix only after CDP round-trips succeed.
-			// Otherwise a failed install would leave `currentTitlePrefix` set,
-			// and the early-return guard above would block the next retry.
+			// Record the successful prefix only after the CDP round-trip
+			// succeeds. Otherwise a failed install would leave
+			// `currentTitlePrefix` set, and the early-return guard above would
+			// block the next retry. Setting it also arms `reapplyTitlePrefix`
+			// for subsequent navigations.
+			this.titleOwnerId = ownerId ?? null;
 			this.currentTitlePrefix = prefix;
 			this.log.appendLine(`[CDP:${this.tabId}] Title prefix set to "${prefix}"`);
 		} catch (err) {
@@ -883,16 +893,10 @@ export class CDPTab {
 		// Nothing was ever installed on this tab (e.g. an adopted user page in a
 		// bridge-owned-only setup): do not inject a strip script into a page we
 		// never marked. Guards revoke/disconnect/refreshIndicators at once.
-		if (!this.titleScriptId && !this.currentTitlePrefix) return;
+		if (!this.currentTitlePrefix) return;
 		try {
 			const hasTransport = (this.ws && this.ws.readyState === WebSocket.OPEN) || this._browserTabSession !== null;
 			if (!hasTransport) return;
-			if (this.titleScriptId) {
-				await this.send('Page.removeScriptToEvaluateOnNewDocument', {
-					identifier: this.titleScriptId,
-				}).catch(() => {});
-				this.titleScriptId = null;
-			}
 			// Best-effort: disconnect observer, strip our prefix, and uninstall the
 			// document.title setter interception. Deleting the own-property accessor
 			// exposes the native Document.prototype title again; leaving it in place
@@ -914,6 +918,7 @@ export class CDPTab {
 			// Best-effort cleanup
 		} finally {
 			this.currentTitlePrefix = null;
+			this.titleOwnerId = null;
 		}
 	}
 
@@ -938,9 +943,20 @@ export class CDPTab {
 			case 'Page.frameNavigated': {
 				const frame = params.frame as { url?: string; parentId?: string } | undefined;
 				// Root frame only — subframes don't set our tab's URL.
-				if (frame?.url && !frame.parentId) this._lastKnownUrl = frame.url;
+				if (frame?.url && !frame.parentId) {
+					this._lastKnownUrl = frame.url;
+					// A new document has no prefix and no observer: put ours back.
+					this.reapplyTitlePrefix();
+				}
 				break;
 			}
+			// Safety net for the frameNavigated race: if the execution context
+			// was not ready yet, the evaluate above failed silently. The script
+			// is idempotent (it disconnects any observer it already installed),
+			// so running it twice on a settled document costs nothing.
+			case 'Page.domContentEventFired':
+				this.reapplyTitlePrefix();
+				break;
 			// Download events fire under `Page.*` on the BrowserTab
 			// (proposed-API) transport and also surface as `Browser.*` on
 			// some Chromium / proxy combinations. The CDP spec marks the

@@ -90,16 +90,16 @@
             "tcp"
           ],
           "enumDescriptions": [
-            "Prefer a unix socket / named pipe; fall back to a TCP port if one cannot be created",
-            "Require a unix socket / named pipe; fail startup rather than open a port",
-            "Always listen on a TCP port (needed only when the MCP client cannot reach this machine's filesystem)"
+            "Unix socket / named pipe, falling back to a TCP port",
+            "Unix socket / named pipe only; fail rather than open a port",
+            "Always a TCP port; needed when the client cannot reach this filesystem"
           ],
-          "description": "How external agents reach the bridge. The default avoids opening any listening port: it binds a unix socket (or named pipe on Windows) that no other machine can reach and no port scan can find. TCP remains available for setups where the MCP client and the extension host do not share a filesystem."
+          "description": "How external agents reach the bridge. The default opens no listening port."
         },
         "integratedBrowserMcp.httpPort": {
           "type": "number",
           "default": 3788,
-          "description": "TCP port used only when integratedBrowserMcp.transport resolves to tcp. Ignored when listening on a socket/pipe."
+          "description": "TCP port, used only when Transport resolves to tcp."
         },
         "integratedBrowserMcp.autoStart": {
           "type": "boolean",
@@ -115,11 +115,11 @@
             "off"
           ],
           "enumDescriptions": [
-            "Prefix '(N) ' — lets you say \"reload browser 2\" and match browser_tab_list's number",
-            "Prefix a fixed symbol — shows the tab is agent-controlled without implying an ordering",
+            "Prefix '(N) ' — lets you say \"reload browser 2\"",
+            "Prefix a fixed symbol — no ordering implied",
             "Never modify tab titles"
           ],
-          "description": "How to mark browser tabs that are under agent control. Only tabs the bridge opened itself are marked — pages you opened are never touched. Marking works by rewriting the page's real document.title (the only lever an extension has over the editor tab label), so the page can observe it: choose 'off' if a page or tool needs the unmodified title, e.g. when reading it back via browser_eval."
+          "description": "How to mark tabs under agent control. Only tabs the bridge opened are marked; marking rewrites the page's document.title."
         },
         "integratedBrowserMcp.tabIndicatorText": {
           "type": "string",
@@ -132,18 +132,18 @@
             "[AI]"
           ],
           "enumDescriptions": [
-            "Black circle — widest font coverage, renders essentially everywhere",
-            "Black diamond — geometric, also very widely supported",
-            "High voltage — colour emoji; needs an emoji font (absent on bare Linux)",
-            "Robot — colour emoji, unambiguously 'an agent'; same font caveat",
-            "Plain ASCII — cannot fail to render, at the cost of width"
+            "Black circle — widest font coverage",
+            "Black diamond — widely supported",
+            "High voltage — needs an emoji font",
+            "Robot — needs an emoji font",
+            "Plain ASCII — always renders"
           ],
-          "description": "Symbol shown on tabs the agent controls when integratedBrowserMcp.tabIndicator is 'marker'. A trailing space is added automatically. Emoji options render in colour on Windows and macOS but can appear as a placeholder box on systems without an emoji font."
+          "description": "Symbol used when Tab Indicator is 'marker'. Emoji need an emoji font to render."
         },
         "integratedBrowserMcp.allowAllExistingTabs": {
           "type": "boolean",
           "default": false,
-          "description": "Let agents drive browser tabs you opened yourself, not just the ones the bridge opened. Off by default: agents can only see and drive their own tabs, and calls on one of your tabs fail — browser_tab_open / browser_navigate keep working, so agents are not blocked. Turn this on if you want an agent to inspect a page you already have open. Note that VS Code's share/unshare does not govern this bridge either way: sharing is Copilot's consent gate for its own tools, and the proposed browser API exposes no sharing state here."
+          "markdownDescription": "Let agents drive browser tabs you opened yourself, not just the ones the bridge opened. [What this affects](https://github.com/thimo/vscode-integrated-browser-mcp#limitations-and-trust-model)"
         },
         "integratedBrowserMcp.browserType": {
           "type": "string",
@@ -160,19 +160,19 @@
         },
         "integratedBrowserMcp.enforceSharing": {
           "type": "boolean",
-          "deprecationMessage": "Replaced by integratedBrowserMcp.allowAllExistingTabs, which expresses the same choice the other way round (enforceSharing: true is now the default). Your existing value still takes effect — an explicit false is read as allowAllExistingTabs: true — but move it to the new key; this one will be removed in a future release."
+          "deprecationMessage": "Replaced by integratedBrowserMcp.allowAllExistingTabs, which states the same choice inverted. An explicit false here still applies, as allowAllExistingTabs: true."
         },
         "browserBridge.httpPort": {
           "type": "number",
-          "deprecationMessage": "Renamed to integratedBrowserMcp.httpPort. Your existing value still takes effect, but move it to the new key — this one will be removed in a future release."
+          "deprecationMessage": "Renamed to integratedBrowserMcp.httpPort. Your existing value still applies."
         },
         "browserBridge.autoStart": {
           "type": "boolean",
-          "deprecationMessage": "Renamed to integratedBrowserMcp.autoStart. Your existing value still takes effect, but move it to the new key — this one will be removed in a future release."
+          "deprecationMessage": "Renamed to integratedBrowserMcp.autoStart. Your existing value still applies."
         },
         "browserBridge.browserType": {
           "type": "string",
-          "deprecationMessage": "Renamed to integratedBrowserMcp.browserType. Your existing value still takes effect, but move it to the new key — this one will be removed in a future release."
+          "deprecationMessage": "Renamed to integratedBrowserMcp.browserType. Your existing value still applies."
         }
       }
     },
