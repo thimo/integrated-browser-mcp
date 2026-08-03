@@ -128,7 +128,7 @@ export function activate(context: vscode.ExtensionContext) {
 			// the setting off would leave every already-marked page carrying a
 			// modified title until it happened to be reopened.
 			if (event.affectsConfiguration('integratedBrowserMcp.tabIndicator')
-				|| event.affectsConfiguration('integratedBrowserMcp.tabIndicatorText')) {
+				|| event.affectsConfiguration('integratedBrowserMcp.tabIndicatorMarker')) {
 				cdp?.refreshIndicators().catch(err => log.appendLine(`[Bridge] Indicator refresh failed: ${err}`));
 			}
 		}),

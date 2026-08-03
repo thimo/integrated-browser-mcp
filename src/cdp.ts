@@ -67,8 +67,8 @@ function tabIndicatorMode(): TabIndicatorMode {
 	return value === 'off' || value === 'marker' || value === 'number' ? value : 'number';
 }
 
-function tabIndicatorText(): string {
-	const raw = vscode.workspace.getConfiguration('integratedBrowserMcp').get<string>('tabIndicatorText', '●');
+function tabIndicatorMarker(): string {
+	const raw = vscode.workspace.getConfiguration('integratedBrowserMcp').get<string>('tabIndicatorMarker', '●');
 	// The setting offers bare symbols so the dropdown reads cleanly (a trailing
 	// space would be invisible there), but the prefix needs one to separate it
 	// from the title. Normalising also keeps older settings that already
@@ -128,8 +128,8 @@ export class CDPManager {
 		if (!tab.bridgeOwned) return null;
 		const mode = tabIndicatorMode();
 		if (mode === 'off') return null;
-		if (mode === 'marker') return tabIndicatorText();
-		return tab.displayNumber !== null ? numberToPrefix(tab.displayNumber) : tabIndicatorText();
+		if (mode === 'marker') return tabIndicatorMarker();
+		return tab.displayNumber !== null ? numberToPrefix(tab.displayNumber) : tabIndicatorMarker();
 	}
 
 	/**

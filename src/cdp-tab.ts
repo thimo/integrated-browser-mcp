@@ -613,7 +613,7 @@ export class CDPTab {
 		const token = (extraToken ?? '').trim().replace(/[\u0000-\u001f]/g, '');
 		const extra = token ? '|' + token.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') : '';
 		// U+25CF (●) is deliberately NOT in this static set: it is the default
-		// `tabIndicatorText` marker, handled dynamically via `extra`, and pages
+		// `tabIndicatorMarker` marker, handled dynamically via `extra`, and pages
 		// legitimately titled "● …" (live/recording indicators) must keep it when
 		// it is not the active marker. U+25C9 (◉) stays — a real historical bridge
 		// marker (0.3.0), never page content.

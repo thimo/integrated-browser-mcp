@@ -121,7 +121,7 @@
           ],
           "description": "How to mark tabs under agent control. Only tabs the bridge opened are marked; marking rewrites the page's document.title."
         },
-        "integratedBrowserMcp.tabIndicatorText": {
+        "integratedBrowserMcp.tabIndicatorMarker": {
           "type": "string",
           "default": "●",
           "enum": [
