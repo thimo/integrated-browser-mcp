@@ -56,6 +56,8 @@ export async function enforceTabAccess(cdp: CDPManager): Promise<void> {
 	for (const info of cdp.list()) {
 		const tab = cdp.getTab(info.tabId);
 		if (!tab || tab.bridgeOwned) continue;
-		await cdp.revokeTab(info.tabId, 'the bridge drives only tabs it opened itself; set integratedBrowserMcp.allowAllExistingTabs to true to allow driving tabs you opened');
+		// Reason only — callers append the remedy, so naming the setting here
+		// too would say it twice in one message.
+		await cdp.revokeTab(info.tabId, 'the bridge drives only tabs it opened itself');
 	}
 }

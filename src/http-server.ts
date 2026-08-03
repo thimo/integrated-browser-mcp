@@ -5,7 +5,7 @@ import express from 'express';
 import type { CDPManager } from './cdp';
 import type { CDPTab, DownloadBehavior } from './cdp-tab';
 import type * as vscode from 'vscode';
-import { hasProposedBrowserApi } from './cdp';
+import { hasProposedBrowserApi, openBrowserTabCount } from './cdp';
 import { allowsAllExistingTabs, enforceTabAccess as runEnforceTabAccess } from './sharing';
 import { decodePng, pixelAt } from './png';
 
@@ -202,21 +202,34 @@ export class BridgeServer {
 	 * Page creation now belongs to `/navigate` and `/tab/open` alone.
 	 */
 	private requireExistingTab(): (req: express.Request, res: express.Response, next: express.NextFunction) => void {
-		return (_req, res, next) => {
+		return (req, res, next) => {
 			this.enforceTabAccess()
 				.catch(err => this.log.appendLine(`[Bridge] Tab access enforcement failed: ${err}`))
-				.then(() => this.afterEnforcement(res, next));
+				.then(() => this.afterEnforcement(req, res, next));
 		};
 	}
 
-	private afterEnforcement(res: express.Response, next: express.NextFunction): void {
+	private afterEnforcement(req: express.Request, res: express.Response, next: express.NextFunction): void {
 		{
 			if (this.cdp.tabCount === 0) {
+				// "No attached page" is the wrong story when pages *are* open and
+				// simply are not ours: an agent reports "nothing is open" while
+				// the user looks straight at their page. This is the ordinary
+				// case now that the bridge only drives tabs it opened, and it
+				// short-circuits before `resolveTab` can explain a revocation —
+				// so explain it here, where the caller actually lands.
+				const withheld = allowsAllExistingTabs() ? 0 : openBrowserTabCount();
+				const revoked = this.revokedErrorFor(req);
 				res.json({
 					ok: false,
-					reason: 'no_attached_page',
-					error: 'No attached page. This is a read-only call, so the bridge did not create one.',
-					hint: 'Call browser_navigate with a url and no tabId to create and attach a page, then retry. browser_tab_list shows attached tabs; browser_status reports capabilities.',
+					reason: revoked ? 'tab_revoked' : withheld > 0 ? 'no_drivable_page' : 'no_attached_page',
+					error: revoked
+						?? (withheld > 0
+							? `No drivable page. ${withheld} page(s) are open in the integrated browser, but the bridge only drives tabs it opened.`
+							: 'No attached page. This is a read-only call, so the bridge did not create one.'),
+					hint: withheld > 0
+						? 'Open your own page with browser_navigate (url, no tabId) or browser_tab_open — same browser, same cookies, but a fresh load. To work in the user\'s existing pages instead, they must enable integratedBrowserMcp.allowAllExistingTabs.'
+						: 'Call browser_navigate with a url and no tabId to create and attach a page, then retry. browser_tab_list shows attached tabs; browser_status reports capabilities.',
 					// Name the cause here too: "no attached page" while degraded
 					// usually means the page exists but is unattachable, which
 					// is a very different situation from "no page open".
@@ -275,6 +288,19 @@ export class BridgeServer {
 		};
 	}
 
+	/**
+	 * Explain a `tabId` the bridge has withdrawn, or undefined if this request
+	 * named no tab or a tab that was never revoked. Shared by `resolveTab` and
+	 * the no-tabs short-circuit, which an agent hits first when the revoked tab
+	 * was the only one.
+	 */
+	private revokedErrorFor(req: express.Request): string | undefined {
+		const tabId = (req.query.tabId as string | undefined) ?? (req.body?.tabId as string | undefined);
+		const revoked = tabId ? this.cdp.revokedReason(tabId) : undefined;
+		if (!revoked) return undefined;
+		return `Tab ${tabId} is no longer accessible: ${revoked}. Sharing the page in VS Code does not restore access — either work in your own tab (browser_tab_open, or browser_navigate with no tabId), or ask the user to enable integratedBrowserMcp.allowAllExistingTabs.`;
+	}
+
 	/** Resolve the target tab for a request (query `?tabId=` or body `tabId`). */
 	private resolveTab(req: express.Request): { tab?: CDPTab; error?: string } {
 		const tabId = (req.query.tabId as string | undefined) ?? (req.body?.tabId as string | undefined);
@@ -283,10 +309,8 @@ export class BridgeServer {
 			// Distinguish "revoked" from "never existed": an agent holding a
 			// tabId from before enforcement ran needs to know its access was
 			// withdrawn, not that it mistyped an id.
-			const revoked = tabId ? this.cdp.revokedReason(tabId) : undefined;
-			if (revoked) {
-				return { error: `Tab ${tabId} is no longer accessible: ${revoked}. Sharing the page in VS Code does NOT restore access. Either work in your own tab (browser_tab_open, or browser_navigate with no tabId), or ask the user to enable integratedBrowserMcp.allowAllExistingTabs.` };
-			}
+			const revoked = this.revokedErrorFor(req);
+			if (revoked) return { error: revoked };
 			return { error: tabId ? `No tab with id ${tabId}` : 'No active tab. Use browser_tab_open first.' };
 		}
 		return { tab };

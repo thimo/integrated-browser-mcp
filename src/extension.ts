@@ -70,6 +70,20 @@ function migratedGet<T>(key: string, def: T): T {
 	return def;
 }
 
+/**
+ * Adopt every browser tab VS Code currently has open. Used at startup and
+ * whenever access is widened; `adoptBrowserTab` is idempotent, so tabs already
+ * tracked are left alone.
+ */
+function adoptOpenBrowserTabs(): void {
+	if (!cdp || !hasProposedBrowserApi()) return;
+	for (const tab of vscode.window.browserTabs) {
+		cdp.adoptBrowserTab(tab, tab === vscode.window.activeBrowserTab).catch(err => {
+			log.appendLine(`[Bridge] adoptBrowserTab failed: ${err}`);
+		});
+	}
+}
+
 /** True when something is actively accepting on this socket path (don't unlink a live one). */
 function socketIsLive(socketPath: string): Promise<boolean> {
 	return new Promise(resolve => {
@@ -130,6 +144,13 @@ export function activate(context: vscode.ExtensionContext) {
 			if (event.affectsConfiguration('integratedBrowserMcp.tabIndicator')
 				|| event.affectsConfiguration('integratedBrowserMcp.tabIndicatorMarker')) {
 				cdp?.refreshIndicators().catch(err => log.appendLine(`[Bridge] Indicator refresh failed: ${err}`));
+			}
+			// Turning access off takes effect on its own — enforcement runs before
+			// every call. Turning it ON needed a window reload: the tabs were
+			// already revoked and disposed, and nothing re-adopts them. Adopt the
+			// window's tabs again so the setting is symmetric.
+			if (event.affectsConfiguration('integratedBrowserMcp.allowAllExistingTabs')) {
+				adoptOpenBrowserTabs();
 			}
 		}),
 	);
@@ -277,11 +298,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 					}),
 				);
 				// Adopt any tabs already open at startup.
-				for (const existingTab of vscode.window.browserTabs) {
-					cdp.adoptBrowserTab(existingTab, existingTab === vscode.window.activeBrowserTab).catch(err => {
-						log.appendLine(`[Bridge] Startup adoptBrowserTab failed: ${err}`);
-					});
-				}
+				adoptOpenBrowserTabs();
 				proposedApiWired = true;
 			} catch (err) {
 				log.appendLine(`[Bridge] Proposed browser API declared but not granted, falling back: ${err}`);

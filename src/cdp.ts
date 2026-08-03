@@ -45,6 +45,21 @@ export function hasProposedBrowserApi(): boolean {
 	}
 }
 
+/**
+ * How many browser tabs VS Code has open in this window, whatever the bridge
+ * is allowed to drive. Lets "no attached page" distinguish "nothing is open"
+ * from "pages are open but not yours" — the common case once the bridge only
+ * drives tabs it opened. Zero when the proposal is ungranted, where the count
+ * is unknowable.
+ */
+export function openBrowserTabCount(): number {
+	try {
+		return hasProposedBrowserApi() ? vscode.window.browserTabs.length : 0;
+	} catch {
+		return 0;
+	}
+}
+
 export type TabIndicatorMode = 'off' | 'marker' | 'number';
 
 /**
