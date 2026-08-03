@@ -15,7 +15,11 @@ export interface TabInfo {
 	number: number | null;
 	url: string;
 	title: string;
-	/** Favicon URI when VS Code exposes one. */
+	/**
+	 * Favicon when VS Code exposes one: a theme-icon id, a URL, or `data:<type>`
+	 * for one inlined in the page — the payload of those is dropped, see
+	 * {@link compactIcon}.
+	 */
 	icon?: string;
 	active: boolean;
 	state: CDPState;
@@ -102,6 +106,27 @@ function tabIndicatorMarker(): string {
  */
 function numberToPrefix(n: number): string {
 	return `(${n}) `;
+}
+
+/** Longest icon value worth passing through verbatim — comfortably fits a URL. */
+const MAX_ICON_LENGTH = 256;
+
+/**
+ * Shorten an embedded favicon to its media type.
+ *
+ * VS Code hands back whatever the tab exposes: a theme-icon id (`globe`), a
+ * URL, or the favicon inlined as a `data:` URI. That last form is routinely
+ * 8 KB of base64 — per tab — which dwarfs every other field in
+ * `browser_tab_list` and buys an agent nothing, since it cannot look at an
+ * image it can only copy. Keep the fact that the tab has a favicon, drop the
+ * payload.
+ */
+export function compactIcon(icon: string | undefined): string | undefined {
+	if (!icon || icon.length <= MAX_ICON_LENGTH) return icon;
+	if (!icon.startsWith('data:')) return icon.slice(0, MAX_ICON_LENGTH);
+	// `data:<mediatype>[;base64],<payload>` — keep up to the media type.
+	const mediaType = icon.slice(5).split(/[;,]/, 1)[0];
+	return mediaType ? `data:${mediaType}` : 'data:';
 }
 
 /**
@@ -295,7 +320,7 @@ export class CDPManager {
 			number: tab.displayNumber,
 			url: tab.url,
 			title: tab.title,
-			icon: tab.iconUri,
+			icon: compactIcon(tab.iconUri),
 			active: tab.tabId === this._activeTabId,
 			state: tab.state,
 			transport: tab.transport,

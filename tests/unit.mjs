@@ -88,6 +88,26 @@ const section = name => console.log(`\n${name}`);
 	eq('tolerates a default port in the composed origin', strip('Local (http://localhost:80/)', 'http://localhost/app'), 'Local');
 }
 
+// -------------------------------------------------------------------- cdp
+{
+	section('compactIcon — an inlined favicon dwarfs every other field in a tab listing');
+	const { compactIcon } = await load('src/cdp.ts');
+
+	// Theme-icon ids and ordinary URLs are already short: pass them through.
+	eq('keeps a theme icon id', compactIcon('globe'), 'globe');
+	eq('keeps a favicon URL', compactIcon('https://example.com/favicon.ico'), 'https://example.com/favicon.ico');
+	eq('keeps undefined', compactIcon(undefined), undefined);
+	// A short data URI is harmless; only the long ones are the problem.
+	eq('keeps a short data URI', compactIcon('data:image/png;base64,AAAA'), 'data:image/png;base64,AAAA');
+
+	const long = 'data:image/vnd.microsoft.icon;base64,' + 'A'.repeat(9000);
+	eq('drops the payload of an inlined favicon', compactIcon(long), 'data:image/vnd.microsoft.icon');
+	eq('without a media type', compactIcon('data:;base64,' + 'A'.repeat(9000)), 'data:');
+	eq('no semicolon, only a comma', compactIcon('data:image/png,' + 'A'.repeat(9000)), 'data:image/png');
+	// A non-data URI that is somehow enormous still gets bounded.
+	eq('bounds a huge non-data value', compactIcon('https://x.com/' + 'a'.repeat(9000)).length, 256);
+}
+
 // ------------------------------------------------------------ http-server
 {
 	section('projectAXNodes — a raw SPA tree is six figures of characters');
