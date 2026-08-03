@@ -84,6 +84,21 @@ function adoptOpenBrowserTabs(): void {
 	}
 }
 
+/**
+ * Fallback-path counterpart of {@link adoptOpenBrowserTabs}: pick up the browser
+ * debug session that is already running once access is widened. Without this,
+ * enabling `allowAllExistingTabs` would do nothing on a build without the
+ * proposed API, because that session was refused at start and nothing re-offers
+ * it. `adoptDebugSession` re-checks the setting and returns null if it is off.
+ */
+function adoptExistingDebugSession(): void {
+	const session = vscode.debug.activeDebugSession;
+	if (!cdp || cdp.tabCount > 0 || !session || !isBrowserSession(session)) return;
+	cdp.adoptDebugSession(session, false).catch(err => {
+		log.appendLine(`[Bridge] adoptDebugSession failed: ${err}`);
+	});
+}
+
 /** True when something is actively accepting on this socket path (don't unlink a live one). */
 function socketIsLive(socketPath: string): Promise<boolean> {
 	return new Promise(resolve => {
@@ -120,8 +135,10 @@ export function activate(context: vscode.ExtensionContext) {
 			// Auto-connect to externally launched browser child sessions on the
 			// fallback (websocket) path. Skip root sessions (no CDP), skip if
 			// launchBrowser() is handling it, and skip if we already have tabs.
+			// Not bridge-owned: this is a session someone else started, so it is
+			// only adopted when the user allows their own tabs to be driven.
 			if (isBrowserSession(session) && session.parentSession && cdp && cdp.tabCount === 0 && !browserLaunching) {
-				cdp.adoptDebugSession(session).catch(err => {
+				cdp.adoptDebugSession(session, false).catch(err => {
 					log.appendLine(`[Bridge] Auto-connect failed: ${err}`);
 				});
 			}
@@ -151,6 +168,7 @@ export function activate(context: vscode.ExtensionContext) {
 			// window's tabs again so the setting is symmetric.
 			if (event.affectsConfiguration('integratedBrowserMcp.allowAllExistingTabs')) {
 				adoptOpenBrowserTabs();
+				adoptExistingDebugSession();
 			}
 		}),
 	);
@@ -311,13 +329,16 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 				? vscode.debug.activeDebugSession
 				: undefined;
 			if (existingSession) {
-				await cdp.adoptDebugSession(existingSession);
+				await cdp.adoptDebugSession(existingSession, false);
 			}
 			// Otherwise, browser will be launched lazily on first request.
 		}
 
 		// 5. Register this instance for MCP discovery
 		await registerInstance(actualEndpoint);
+		// The endpoint is known now; re-resolve so the VS Code MCP definition
+		// carries the pin instead of the empty env it was registered with.
+		mcpDidChange?.fire();
 
 		// 6. Configure Claude (server already synced above). The VS Code MCP
 		//    provider is registered once at activation, not here.
@@ -385,6 +406,8 @@ function summarizeTabs(): { count: number; activeUrl?: string } {
 async function stopBridge(): Promise<void> {
 	running = false;
 	actualEndpoint = {};
+	// Drop the endpoint pin from the MCP definition; the next start fires again.
+	mcpDidChange?.fire();
 	// Dispose per-start subscriptions first: they deref `cdp`, so they must stop
 	// firing before it is torn down and nulled.
 	for (const d of startDisposables) {
@@ -488,7 +511,7 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
 	}
 
 	try {
-		await cdp.adoptDebugSession(session);
+		await cdp.adoptDebugSession(session, true);
 	} catch (err) {
 		log.appendLine(`[Bridge] CDP connect error: ${err}`);
 	}
@@ -503,6 +526,16 @@ async function launchBrowser(_lazyUrl?: string): Promise<void> {
  * Feature-detected: the API is stable in 1.101+ but this extension supports
  * older builds.
  */
+/**
+ * The endpoint pin handed to a VS Code-hosted MCP client. Empty while the bridge
+ * is stopped — the server then discovers as before, which is the best it can do.
+ */
+function endpointEnv(): Record<string, string> {
+	if (actualEndpoint.socketPath) return { BROWSER_BRIDGE_SOCKET: actualEndpoint.socketPath };
+	if (actualEndpoint.port) return { BROWSER_BRIDGE_PORT: String(actualEndpoint.port) };
+	return {};
+}
+
 function registerMcpProvider(context: vscode.ExtensionContext): void {
 	const lm = vscode.lm as unknown as { registerMcpServerDefinitionProvider?: unknown };
 	if (typeof lm.registerMcpServerDefinitionProvider !== 'function') return;
@@ -520,7 +553,13 @@ function registerMcpProvider(context: vscode.ExtensionContext): void {
 			vscode.lm.registerMcpServerDefinitionProvider('integratedBrowserMcp', {
 				onDidChangeMcpServerDefinitions: mcpDidChange.event,
 				provideMcpServerDefinitions: () => [
-					new vscode.McpStdioServerDefinition('Integrated Browser', 'node', [STABLE_SERVER]),
+					// Pin the server to *this* window's bridge. Without the env it
+					// falls back to discovery, which matches on cwd — and the
+					// extension host's cwd is not the workspace, so the match fails
+					// and the newest instance wins. With several windows open that
+					// silently drives another window's browser, and scopes download
+					// paths against that window's workspace.
+					new vscode.McpStdioServerDefinition('Integrated Browser', 'node', [STABLE_SERVER], endpointEnv()),
 				],
 			}),
 		);

@@ -135,6 +135,16 @@ export class CDPTab {
 	private _onStateChange = new vscode.EventEmitter<CDPState>();
 	readonly onStateChange = this._onStateChange.event;
 
+	private _onGaveUp = new vscode.EventEmitter<void>();
+	/**
+	 * Fires when reconnection is abandoned. The manager must prune the tab: the
+	 * give-up clears the session identity every other cleanup path matches on
+	 * (the debug-terminate listener keys on `sessionId`), so a tab left in the
+	 * map here is never removed — `tabCount` stays above zero, the lazy relaunch
+	 * never fires, and every call answers "CDP not connected" until a restart.
+	 */
+	readonly onGaveUp = this._onGaveUp.event;
+
 	private _sessionId: string | null = null;
 	private _session: vscode.DebugSession | null = null;
 	private _transport: 'websocket' | 'browserTab' | null = null;
@@ -1201,6 +1211,9 @@ export class CDPTab {
 		if (this.disposed || this.reconnectTimer || !this._session) return;
 		if (this.reconnectAttempts >= CDPTab.MAX_RECONNECT_ATTEMPTS) {
 			this.log.appendLine(`[CDP:${this.tabId}] Max reconnect attempts (${CDPTab.MAX_RECONNECT_ATTEMPTS}) reached, giving up`);
+			// Announce before clearing: the handler still needs `debugSession` to
+			// tear the session down.
+			this._onGaveUp.fire();
 			this._session = null;
 			this._sessionId = null;
 			return;
@@ -1257,5 +1270,6 @@ export class CDPTab {
 		this.disconnect();
 		this._onStateChange.dispose();
 		this._onTabStateChange.dispose();
+		this._onGaveUp.dispose();
 	}
 }

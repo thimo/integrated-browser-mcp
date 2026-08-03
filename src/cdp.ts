@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { CDPTab, CDPState, ConsoleEntry, NetworkEntry, DownloadEntry } from './cdp-tab';
+import { allowsAllExistingTabs } from './sharing';
 
 export { CDPState, ConsoleEntry, NetworkEntry, DownloadEntry };
 
@@ -433,18 +434,31 @@ export class CDPManager {
 
 	/**
 	 * Adopt a VS Code debug session (fallback path). Creates a single synthetic
-	 * tab with id `tab-main`.
+	 * tab with id `tab-main`. `bridgeOwned` is true only for the session
+	 * `launchBrowser()` started; returns null when an unowned session is refused.
 	 */
-	async adoptDebugSession(session: vscode.DebugSession): Promise<CDPTab> {
+	async adoptDebugSession(session: vscode.DebugSession, bridgeOwned: boolean): Promise<CDPTab | null> {
 		const existing = this.tabs.get('tab-main');
 		if (existing) return existing;
+		// A session the bridge did not launch is the user's own browser, and the
+		// access model says we do not drive those. Unlike the proposed-API path
+		// there is no per-tab lifecycle event to revoke from later, so the check
+		// happens here instead of in `enforceTabAccess`: refusing to attach at all
+		// beats opening a CDP connection to a page we would revoke on the first
+		// call anyway.
+		if (!bridgeOwned && !allowsAllExistingTabs()) {
+			this.log.appendLine('[Bridge] Not adopting a browser session the bridge did not launch (integratedBrowserMcp.allowAllExistingTabs is off)');
+			return null;
+		}
 		const tab = new CDPTab('tab-main', this.log);
-		// The fallback path's single tab is launched by the bridge itself, so
-		// it is bridge-owned — otherwise enforcement would revoke it
-		// immediately and leave the extension with nothing to drive.
-		tab.bridgeOwned = true;
-		tab.agentControlled = true;
-		tab.displayNumber = 1;
+		tab.bridgeOwned = bridgeOwned;
+		// Same rule as `adoptBrowserTab`: opening the tab is itself an action, so a
+		// bridge-launched one is numbered at once. An adopted one waits until an
+		// agent actually works in it.
+		if (bridgeOwned) {
+			tab.agentControlled = true;
+			tab.displayNumber = this.allocateNumber();
+		}
 		this.registerTab(tab);
 		await tab.connectToSession(session);
 		const prefix = this.indicatorPrefixFor(tab);
@@ -456,7 +470,39 @@ export class CDPManager {
 
 	private registerTab(tab: CDPTab): void {
 		this.tabs.set(tab.tabId, tab);
-		this.tabSubscriptions.set(tab.tabId, tab.onStateChange(() => this.emitStateChange()));
+		this.tabSubscriptions.set(tab.tabId, vscode.Disposable.from(
+			tab.onStateChange(() => this.emitStateChange()),
+			tab.onGaveUp(() => {
+				this.dropUnreachableTab(tab.tabId).catch(err => {
+					this.log.appendLine(`[Bridge] Dropping unreachable ${tab.tabId} failed: ${err}`);
+				});
+			}),
+		));
+	}
+
+	/**
+	 * Remove a tab whose CDP connection is gone for good. Untracking is the point:
+	 * while it sits in the map the bridge looks like it has a tab, so nothing
+	 * relaunches and every call fails. A bridge-owned session is terminated too,
+	 * so the browser editor it left behind goes with it and the next request gets
+	 * a fresh one; an adopted session belongs to the user and is left running.
+	 */
+	private async dropUnreachableTab(tabId: string): Promise<void> {
+		const tab = this.tabs.get(tabId);
+		if (!tab) return;
+		this.log.appendLine(`[Bridge] Dropping ${tabId}: CDP unreachable after repeated reconnects`);
+		const session = tab.bridgeOwned ? tab.debugSession : null;
+		tab.dispose();
+		this.tabSubscriptions.get(tabId)?.dispose();
+		this.tabSubscriptions.delete(tabId);
+		this.tabs.delete(tabId);
+		if (this._activeTabId === tabId) {
+			this._activeTabId = this.tabs.size > 0 ? this.tabs.keys().next().value ?? null : null;
+		}
+		if (session) {
+			try { await vscode.debug.stopDebugging(session); } catch { /* already gone */ }
+		}
+		this.emitStateChange();
 	}
 
 	private emitStateChange(): void {

@@ -176,7 +176,14 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 			isError: true,
 		};
 	}
-	const text = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
+	// `JSON.stringify(undefined)` returns undefined, not a string, and a content
+	// block with `text: undefined` fails the client's result schema — the whole
+	// call comes back as a protocol error instead of a result. `browser_eval` hits
+	// this on any expression that evaluates to undefined, which is most of the
+	// ones an agent runs for effect rather than value.
+	const text = typeof result.data === 'string'
+		? result.data
+		: result.data === undefined ? 'undefined' : JSON.stringify(result.data, null, 2);
 	return { content: [{ type: 'text' as const, text }] };
 }
 
@@ -191,7 +198,7 @@ By default you can only see and drive tabs this bridge opened — tabs the user 
 
 Two very different setups, so check \`browser_status\` \`capabilities\` before planning:
 - **Proposed API granted** (\`capabilities.tabOpen: true\`) — full multi-tab. Open your own tab with \`browser_tab_open\` and pass its \`tabId\` everywhere.
-- **Not granted** (the default for a normally-installed build) — \`browser_tab_open\` fails and the bridge cannot attach to a page the user already opened at all, whatever \`allowAllExistingTabs\` says. The only way to get a working tab is \`browser_navigate\` with **no** \`tabId\`: the bridge lazy-launches its own single tab and navigates it. This opens a separate page rather than taking over the user's, so it is not hijacking — but confirm with the user first if a page is already open, since the bridge tab is the only one you can drive.
+- **Not granted** (the default for a normally-installed build) — \`browser_tab_open\` fails, and a browser the user opened themselves is attached only when \`allowAllExistingTabs\` is on. Otherwise the way to get a working tab is \`browser_navigate\` with **no** \`tabId\`: the bridge lazy-launches its own single tab and navigates it. This opens a separate page rather than taking over the user's, so it is not hijacking — but confirm with the user first if a page is already open, since the bridge tab is the only one you can drive.
 
 Target a specific tab by passing \`tabId\` (from \`browser_tab_list\` or \`browser_tab_open\`) to any interaction tool. Omit \`tabId\` to use the active tab.
 
@@ -555,7 +562,7 @@ server.tool(
 // Status
 server.tool(
 	'browser_status',
-	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode pages you did not open can never be attached or driven, and browser_tab_open is unavailable. Also returns `tabAccess`, which says whether you may drive tabs the user opened (`allowAllExistingTabs`, off by default) — check it before telling a user why their page is not in browser_tab_list. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
+	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode there is a single tab and browser_tab_open is unavailable. Also returns `tabAccess`, which says whether you may drive tabs the user opened (`allowAllExistingTabs`, off by default) — check it before telling a user why their page is not in browser_tab_list. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
 	{},
 	async () => toMcpResult(await bridgeFetch('/status')),
 );
