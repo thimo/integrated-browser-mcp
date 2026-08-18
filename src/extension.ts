@@ -271,7 +271,7 @@ async function startBridge(context: vscode.ExtensionContext): Promise<void> {
 		cdp.onStateChange(state => statusBar.update(state, running, cdp.transport, summarizeTabs()));
 
 		// 3. HTTP server (socket-first, TCP fallback)
-		httpServer = new BridgeServer(cdp, log);
+		httpServer = new BridgeServer(cdp, log, getWorkspacePath());
 		httpServer.setEnsureBrowser(url => ensureBrowser(url));
 		actualEndpoint = await listenBest(httpServer, config, preferredPort);
 		running = true;

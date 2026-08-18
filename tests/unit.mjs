@@ -14,6 +14,9 @@
 import * as esbuild from 'esbuild';
 import { createRequire } from 'module';
 import zlib from 'zlib';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 const VSCODE_STUB = `
 	export const workspace = { getConfiguration: () => ({ get: (_k, d) => d }) };
@@ -277,6 +280,62 @@ const section = name => console.log(`\n${name}`);
 	throws('rejects an oversized header', () => decodePng(bigPng));
 
 	throws('rejects a non-PNG', () => decodePng(Buffer.from('definitely not a png')));
+}
+
+// -------------------------------------------------------------- instances
+{
+	section('instance selection — which VS Code window a call is routed to');
+	const { selectInstance, resolveTarget, foreignWindowNote, readInstances } = await load('src/instances.ts');
+	const inst = (workspace, extra = {}) => ({ workspace, pid: 1, startedAt: '2026-01-01T00:00:00.000Z', port: 3788, ...extra });
+
+	const natrium = inst('/Users/x/src/electrolyte-natrium', { port: 3792, startedAt: '2026-08-18T10:01:00.000Z' });
+	const energica = inst('/Users/x/src/energica-tool', { port: 3789, startedAt: '2026-08-17T17:03:53.000Z' });
+	const src = inst('/Users/x/src', { port: 3790, startedAt: '2026-08-14T19:36:00.000Z' });
+	const magnesium = inst('/Users/x/src/electrolyte-magnesium', { port: 3788, startedAt: '2026-08-17T14:03:29.000Z' });
+
+	eq('exact workspace match', selectInstance([energica, natrium], '/Users/x/src/electrolyte-natrium').match, 'cwd');
+	eq('cwd inside the workspace', selectInstance([energica, natrium], '/Users/x/src/electrolyte-natrium/app/models').instance.port, 3792);
+	// The bug this whole block exists for: no window is registered for the
+	// caller's directory, so an unrelated window gets driven.
+	eq('no match falls back to the newest', selectInstance([magnesium, energica], '/Users/x/src/electrolyte-natrium').instance.port, 3789);
+	eq('and says it fell back', selectInstance([magnesium, energica], '/Users/x/other').match, 'fallback');
+	eq('deepest workspace wins over a parent', selectInstance([src, natrium], '/Users/x/src/electrolyte-natrium').instance.port, 3792);
+	// A sibling directory sharing a prefix is not inside the workspace.
+	eq('matches on a path boundary', selectInstance([natrium], '/Users/x/src/electrolyte-natrium-old').match, 'fallback');
+	eq('nothing registered at all', selectInstance([], '/Users/x/src').instance, null);
+
+	// resolveTarget: env pin wins, and still names the window it points at.
+	const pinned = { BROWSER_BRIDGE_SOCKET: '/tmp/a.sock' };
+	const socketInst = inst('/Users/x/src/pottagold', { port: undefined, socketPath: '/tmp/a.sock' });
+	eq('env socket pin', resolveTarget(pinned, '/Users/x/elsewhere', [socketInst, energica]).match, 'env');
+	eq('env pin resolves the window', resolveTarget(pinned, '/Users/x/elsewhere', [socketInst, energica]).instance.workspace, '/Users/x/src/pottagold');
+	eq('env port pin', resolveTarget({ BROWSER_BRIDGE_PORT: '3789' }, '/Users/x/elsewhere', [energica]).endpoints, [{ port: 3789 }]);
+	eq('ignores a junk env port', resolveTarget({ BROWSER_BRIDGE_PORT: 'nope' }, '/Users/x/src/energica-tool', [energica]).match, 'cwd');
+	// A discovered instance is authoritative: no silent 3788 fallback appended,
+	// because 3788 is a different workspace's bridge in a multi-window setup.
+	eq('discovered socket only', resolveTarget({}, '/Users/x/src/pottagold', [socketInst, energica]).endpoints, [{ socketPath: '/tmp/a.sock' }]);
+	eq('nothing discovered uses the default port', resolveTarget({}, '/Users/x/src', []).endpoints, [{ port: 3788 }]);
+
+	// The note: only when the choice was genuinely ambiguous.
+	const ambiguous = resolveTarget({}, '/Users/x/src/electrolyte-natrium', [magnesium, energica]);
+	const note = foreignWindowNote(ambiguous);
+	eq('warns on a fallback with several windows', typeof note, 'string');
+	eq('names the window that got the call', note.includes('/Users/x/src/energica-tool'), true);
+	eq('names the caller directory', note.includes('/Users/x/src/electrolyte-natrium'), true);
+	eq('silent on a cwd match', foreignWindowNote(resolveTarget({}, '/Users/x/src/energica-tool', [energica, magnesium])), null);
+	// One window open: the age fallback is the ordinary case, not an accident.
+	eq('silent with a single window', foreignWindowNote(resolveTarget({}, '/Users/x/elsewhere', [energica])), null);
+	eq('silent on an env pin', foreignWindowNote(resolveTarget(pinned, '/Users/x/elsewhere', [socketInst, energica])), null);
+
+	// readInstances: a window that died leaves its file behind until swept.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ibm-instances-'));
+	fs.writeFileSync(path.join(dir, 'live.json'), JSON.stringify(inst('/Users/x/live', { pid: 100 })));
+	fs.writeFileSync(path.join(dir, 'dead.json'), JSON.stringify(inst('/Users/x/dead', { pid: 200 })));
+	fs.writeFileSync(path.join(dir, 'corrupt.json'), '{ not json');
+	fs.writeFileSync(path.join(dir, 'ignore.txt'), 'not an instance file');
+	eq('skips dead and corrupt instances', readInstances(dir, pid => pid === 100).map(i => i.workspace), ['/Users/x/live']);
+	eq('missing dir is not an error', readInstances(path.join(dir, 'nope')), []);
+	fs.rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

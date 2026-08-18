@@ -1,0 +1,175 @@
+/**
+ * Which window's bridge a call goes to.
+ *
+ * Every VS Code window registers a JSON file in `~/.integrated-browser-mcp/instances/`
+ * describing where its bridge listens and which workspace it has open. The MCP
+ * server runs outside all of them, so it has to work out which one the caller
+ * meant — normally from its own working directory, which for a CLI client is
+ * the project the user is in.
+ *
+ * Split out of mcp-server.ts so the selection rules can be unit-tested: that
+ * module opens a stdio transport on import.
+ */
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+export const INSTANCES_DIR = path.join(os.homedir(), '.integrated-browser-mcp', 'instances');
+
+export interface Instance {
+	/** Present when the bridge listens on TCP. */
+	port?: number;
+	/** Present when the bridge listens on a unix socket / named pipe (preferred). */
+	socketPath?: string;
+	workspace: string;
+	pid: number;
+	startedAt: string;
+}
+
+export interface Endpoint {
+	socketPath?: string;
+	port?: number;
+}
+
+/**
+ * How the target was chosen. `fallback` is the one worth reporting: nothing
+ * matched the caller's directory, so we picked a window on age alone.
+ */
+export type MatchKind = 'env' | 'cwd' | 'fallback' | 'default';
+
+export interface Resolution {
+	/** Endpoints to try, in order. */
+	endpoints: Endpoint[];
+	match: MatchKind;
+	/** The window we aimed at, when one is known. */
+	instance: Instance | null;
+	/** Live bridges found, whichever we picked — the ambiguity measure. */
+	liveCount: number;
+	cwd: string;
+	/** Set once a request has actually succeeded against one of the endpoints. */
+	used?: Endpoint;
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Every registered instance whose extension host is still running. */
+export function readInstances(dir: string = INSTANCES_DIR, alive: (pid: number) => boolean = isProcessAlive): Instance[] {
+	const instances: Instance[] = [];
+	try {
+		for (const file of fs.readdirSync(dir)) {
+			if (!file.endsWith('.json')) continue;
+			try {
+				const data = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8')) as Instance;
+				if (!alive(data.pid)) continue; // window is gone; its file has not been swept yet
+				instances.push(data);
+			} catch {
+				// Skip corrupt files
+			}
+		}
+	} catch {
+		// instances dir doesn't exist yet
+	}
+	return instances;
+}
+
+/**
+ * Pick the window a caller in `cwd` most likely means: the deepest registered
+ * workspace containing it. Failing that, the most recently started window —
+ * which is what makes a session started outside any open workspace work at
+ * all, and what quietly drives an unrelated browser when several are open.
+ * The `match` is returned so callers can say which of the two happened.
+ */
+export function selectInstance(instances: Instance[], cwd: string): { instance: Instance | null; match: 'cwd' | 'fallback' | 'default' } {
+	// Deepest path first, so a workspace nested inside another one wins.
+	const byDepth = [...instances].sort((a, b) => (b.workspace ?? '').length - (a.workspace ?? '').length);
+	for (const inst of byDepth) {
+		if (!inst.workspace) continue;
+		// Match on a path boundary: /foo/bar must not match /foo/bar-baz.
+		if (cwd === inst.workspace || cwd.startsWith(inst.workspace + path.sep)) {
+			return { instance: inst, match: 'cwd' };
+		}
+	}
+	const byAge = [...instances].sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
+	if (byAge.length > 0) return { instance: byAge[0], match: 'fallback' };
+	return { instance: null, match: 'default' };
+}
+
+/**
+ * Resolve how to reach the bridge, and record how that choice was made.
+ * A unix socket / named pipe is preferred (no listening port at all); TCP
+ * remains for instances that could not create one, and for the explicit
+ * BROWSER_BRIDGE_PORT override.
+ *
+ * Re-resolved on every call. Caching was unsafe: VS Code windows shift ports
+ * and socket paths on reload, so a cached endpoint can silently route calls to
+ * the wrong workspace's bridge. Reading the instances dir costs ~1ms.
+ */
+export function resolveTarget(
+	env: Record<string, string | undefined>,
+	cwd: string,
+	instances: Instance[],
+	defaultPort = 3788,
+): Resolution {
+	// Env override takes priority (VS Code-hosted clients, manual config,
+	// cross-boundary setups where the MCP server and extension host do not
+	// share a filesystem). Socket first, matching the socket-preferred policy
+	// everywhere else. The instance is looked up anyway: it names the window,
+	// and workspace-scoped paths must resolve against the window we talk to.
+	const envSocket = env.BROWSER_BRIDGE_SOCKET;
+	if (envSocket) {
+		const pinned = instances.find(i => i.socketPath === envSocket) ?? null;
+		return { endpoints: [{ socketPath: envSocket }], match: 'env', instance: pinned, liveCount: instances.length, cwd };
+	}
+	const envPort = Number(env.BROWSER_BRIDGE_PORT);
+	if (env.BROWSER_BRIDGE_PORT && Number.isFinite(envPort) && envPort > 0) {
+		const pinned = instances.find(i => i.port === envPort) ?? null;
+		return { endpoints: [{ port: envPort }], match: 'env', instance: pinned, liveCount: instances.length, cwd };
+	}
+
+	const { instance, match } = selectInstance(instances, cwd);
+	if (instance) {
+		// A discovered instance is authoritative: try exactly what it published
+		// and let a failure surface. Appending the default port here would let a
+		// transient socket error silently reroute to whatever listens on 3788,
+		// which in a multi-window setup is a *different workspace's* bridge.
+		// Driving the wrong window without knowing is worse than failing.
+		const endpoints: Endpoint[] = [];
+		if (instance.socketPath) endpoints.push({ socketPath: instance.socketPath });
+		if (instance.port) endpoints.push({ port: instance.port });
+		if (endpoints.length) return { endpoints, match, instance, liveCount: instances.length, cwd };
+	}
+	// Nothing discovered: fall back to the lowest port the extension binds, which
+	// also covers the version-skew case where an older extension is on TCP and
+	// never wrote a socket path.
+	return { endpoints: [{ port: defaultPort }], match: 'default', instance: null, liveCount: instances.length, cwd };
+}
+
+/** Human-readable form of an endpoint, for status output. */
+export function describeEndpoint(endpoint: Endpoint | undefined): string | null {
+	if (!endpoint) return null;
+	if (endpoint.socketPath) return endpoint.socketPath;
+	return endpoint.port != null ? `127.0.0.1:${endpoint.port}` : null;
+}
+
+/**
+ * The line an agent needs when a call landed in a window the user is not
+ * looking at. Only fires when the choice was actually ambiguous: with a single
+ * bridge running, the age fallback is the normal case for a session started
+ * outside a workspace, not an accident worth narrating.
+ */
+export function foreignWindowNote(resolution: Resolution | null): string | null {
+	if (!resolution || resolution.match !== 'fallback') return null;
+	if (resolution.liveCount < 2 || !resolution.instance) return null;
+	return `Bridge note: no VS Code window is registered for this session's directory (${resolution.cwd}), `
+		+ `so the call went to the window for ${resolution.instance.workspace} — the most recently started of `
+		+ `${resolution.liveCount} windows running the bridge. Any tab it opens is in that window, not the one `
+		+ `the user is looking at. Say so instead of reporting a plain success. Opening ${resolution.cwd} in a `
+		+ `VS Code window with the extension active routes later calls there.`;
+}

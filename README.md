@@ -92,7 +92,7 @@ All interaction tools accept an optional `tabId` parameter. Omit it to target th
 | `browser_tab_close` | Close a tab by id |
 | `browser_tab_list` | List open tabs with their ids, URLs, titles, and active flag |
 | `browser_tab_activate` | Set the default target tab |
-| `browser_status` | Check bridge connection status, including a `capabilities` block reporting what this build supports |
+| `browser_status` | Check bridge connection status, including a `capabilities` block reporting what this build supports and a `bridge` block naming the VS Code window being driven |
 
 ## HTTP API
 
@@ -102,7 +102,7 @@ All interaction endpoints (navigate, eval, click, type, scroll, screenshot, snap
 
 | Method | Endpoint | Body | Description |
 |--------|----------|------|-------------|
-| GET | `/status` | — | Bridge health + diagnostics (transport, active tab, buffer sizes, event counts) |
+| GET | `/status` | — | Bridge health + diagnostics (workspace, transport, active tab, buffer sizes, event counts) |
 | POST | `/navigate` | `{ url, tabId? }` | Navigate to URL |
 | POST | `/eval` | `{ expression, tabId? }` | Run JS in page context |
 | POST | `/click` | `{ selector, tabId? }` | Click element by CSS selector |
@@ -137,9 +137,24 @@ When Claude Code calls a browser tool, the MCP server needs to know which VS Cod
 1. Each VS Code window registers itself at `~/.integrated-browser-mcp/instances/<hash>.json` with its endpoint (socket path or port), workspace path, and PID
 2. The MCP server reads all instance files and filters out dead processes
 3. It matches `process.cwd()` (Claude Code's working directory) against registered workspace paths — deepest match wins
-4. If no workspace matches, it falls back to the most recently started instance
+4. If no workspace matches, it falls back to the most recently started instance — and says so, see below
 
 This means when you run Claude Code inside a VS Code terminal, it automatically connects to the browser in **that** VS Code window.
+
+When step 4 does the choosing and more than one window is running a bridge, the target is a guess: the agent is driving a browser in a window you may not be looking at. `browser_navigate` and `browser_tab_open` return a `Bridge note:` line in that case, so the agent can tell you where the tab actually opened instead of reporting a bare success. `browser_status` always reports the resolved target:
+
+```json
+"bridge": {
+  "workspace": "/Users/you/src/other-project",
+  "pid": 5176,
+  "endpoint": "127.0.0.1:3789",
+  "matchedBy": "fallback",
+  "cwd": "/Users/you/src/this-project",
+  "windowsRunningBridge": 3
+}
+```
+
+`matchedBy` is `cwd` (matched your working directory), `env` (pinned via `BROWSER_BRIDGE_SOCKET` / `BROWSER_BRIDGE_PORT`), `fallback` (newest window, nothing matched), or `default` (no instance registered at all — trying port 3788). Anything other than `cwd` or `env` with several windows open means: open this folder in a VS Code window with the extension active.
 
 ### Manual override
 
@@ -151,7 +166,7 @@ BROWSER_BRIDGE_PORT=3789 claude
 
 ### Troubleshooting
 
-If the MCP server connects to the wrong window, check the registered instances:
+If the MCP server connects to the wrong window, ask it where it is: `browser_status` reports `bridge.workspace` and `bridge.matchedBy`. `matchedBy: "fallback"` means no window is registered for your working directory — the usual cause is that the folder you are working in is not open in any VS Code window (or its bridge failed to start). The raw instance files:
 
 ```bash
 cat ~/.integrated-browser-mcp/instances/*.json

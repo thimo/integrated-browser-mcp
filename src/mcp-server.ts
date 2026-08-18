@@ -4,107 +4,35 @@ import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
-import * as os from 'os';
+import { describeEndpoint, foreignWindowNote, readInstances, resolveTarget } from './instances';
+import type { Instance, Resolution } from './instances';
 
 // Replaced at build time by esbuild's `define` (see esbuild.js). Keeps
 // package.json as the single source of truth for the version string.
 declare const __PKG_VERSION__: string;
 
-const INSTANCES_DIR = path.join(os.homedir(), '.integrated-browser-mcp', 'instances');
-
-interface Instance {
-	/** Present when the bridge listens on TCP. */
-	port?: number;
-	/** Present when the bridge listens on a unix socket / named pipe (preferred). */
-	socketPath?: string;
-	workspace: string;
-	pid: number;
-	startedAt: string;
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function discoverInstance(): Instance | null {
-	const cwd = process.cwd();
-	try {
-		const files = fs.readdirSync(INSTANCES_DIR).filter(f => f.endsWith('.json'));
-		const instances: Instance[] = [];
-		for (const file of files) {
-			try {
-				const data = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, file), 'utf-8'));
-				// Skip instances with dead processes
-				if (!isProcessAlive(data.pid)) continue;
-				instances.push(data);
-			} catch {
-				// Skip corrupt files
-			}
-		}
-
-		// Best match: cwd is inside a registered workspace
-		// Sort by workspace length descending so deeper paths match first
-		instances.sort((a, b) => b.workspace.length - a.workspace.length);
-		for (const inst of instances) {
-			if (!inst.workspace) continue;
-			// Ensure match is on a path boundary (exact match or followed by separator)
-			if (cwd === inst.workspace || cwd.startsWith(inst.workspace + path.sep)) {
-				return inst;
-			}
-		}
-
-		// Fallback: return the most recently started instance
-		instances.sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
-		if (instances.length > 0) {
-			return instances[0];
-		}
-	} catch {
-		// instances dir doesn't exist yet
-	}
-	return null;
+/**
+ * Which VS Code window this process talks to, and how that was decided. See
+ * `instances.ts` — the rules live there so they can be unit-tested.
+ */
+function resolveBridge(): Resolution {
+	return resolveTarget(process.env, process.cwd(), readInstances());
 }
 
 /**
- * Resolve how to reach the bridge. A unix socket / named pipe is preferred
- * (no listening port at all); TCP remains for instances that could not create
- * one, and for the explicit BROWSER_BRIDGE_PORT override.
- *
- * Re-resolved on every call. Caching was unsafe: VS Code windows shift ports
- * and socket paths on reload, so a cached endpoint can silently route calls to
- * the wrong workspace's bridge. Reading the instances dir costs ~1ms.
+ * The resolution behind the most recent bridge request, so tool handlers can
+ * report where a call actually went without re-reading the instances dir and
+ * risking a different answer than the one the request used.
  */
-function resolveEndpoints(): Array<{ socketPath?: string; port?: number }> {
-	// Env override takes priority (manual config / cross-boundary setups where
-	// the MCP server and extension host do not share a filesystem). Socket first,
-	// matching the socket-preferred policy everywhere else.
-	if (process.env.BROWSER_BRIDGE_SOCKET) {
-		return [{ socketPath: process.env.BROWSER_BRIDGE_SOCKET }];
-	}
-	if (process.env.BROWSER_BRIDGE_PORT) {
-		const envPort = Number(process.env.BROWSER_BRIDGE_PORT);
-		if (Number.isFinite(envPort) && envPort > 0) return [{ port: envPort }];
-	}
-	const inst = discoverInstance();
-	if (inst) {
-		// A discovered instance is authoritative: try exactly what it published
-		// and let a failure surface. Appending the default port here would let a
-		// transient socket error silently reroute to whatever listens on 3788,
-		// which in a multi-window setup is a *different workspace's* bridge.
-		// Driving the wrong window without knowing is worse than failing.
-		const candidates: Array<{ socketPath?: string; port?: number }> = [];
-		if (inst.socketPath) candidates.push({ socketPath: inst.socketPath });
-		if (inst.port) candidates.push({ port: inst.port });
-		if (candidates.length) return candidates;
-	}
-	// Nothing discovered: fall back to the lowest port the extension binds, which
-	// also covers the version-skew case where an older extension is on TCP and
-	// never wrote a socket path.
-	return [{ port: 3788 }];
+let lastResolution: Resolution | null = null;
+
+/**
+ * The window whose workspace bounds workspace-scoped paths (downloads,
+ * markdown output). Same resolution the request itself uses, so a path can
+ * never be scoped against a window other than the one being driven.
+ */
+function discoverInstance(): Instance | null {
+	return resolveBridge().instance;
 }
 
 /**
@@ -145,9 +73,13 @@ function requestOne(endpoint: { socketPath?: string; port?: number }, urlPath: s
 /** Try each candidate endpoint in order; report the first success. */
 async function httpRequest(urlPath: string, method: string, body?: string): Promise<string> {
 	let lastError: unknown;
-	for (const endpoint of resolveEndpoints()) {
+	const target = resolveBridge();
+	lastResolution = target;
+	for (const endpoint of target.endpoints) {
 		try {
-			return await requestOne(endpoint, urlPath, method, body);
+			const response = await requestOne(endpoint, urlPath, method, body);
+			lastResolution = { ...target, used: endpoint };
+			return response;
 		} catch (err) {
 			lastError = err;
 		}
@@ -187,12 +119,34 @@ function toMcpResult(result: { ok: boolean; data?: unknown; error?: string }) {
 	return { content: [{ type: 'text' as const, text }] };
 }
 
+interface McpToolResult {
+	// The SDK's result type is open-ended (_meta, structuredContent, …); the
+	// index signature keeps ours assignable to it.
+	[key: string]: unknown;
+	content: Array<{ type: 'text'; text: string }>;
+	isError?: boolean;
+}
+
+/**
+ * Prefix a result with the "this landed in another window" warning when it
+ * applies. Attached only to the calls that put a page in front of someone —
+ * on every read it would be noise, and the same information is in
+ * `browser_status` for anything that wants to check deliberately.
+ */
+function withBridgeNote(result: McpToolResult): McpToolResult {
+	const note = foreignWindowNote(lastResolution);
+	if (!note || result.isError) return result;
+	return { ...result, content: [{ type: 'text' as const, text: note }, ...result.content] };
+}
+
 const SERVER_INSTRUCTIONS = `
 This MCP controls the integrated browser that runs inside VS Code itself — the user sees it in an editor tab, not as a separate Chrome window. Multiple tabs can be open at the same time.
 
 Each tab has a stable number in \`browser_tab_list\`'s \`number\` field. When the user says "reload browser 2" or "open that in tab 3", they mean the tab with that number. A tab gets its number the moment you act on it and shows it in the tab title (per \`integratedBrowserMcp.tabIndicator\`), so the user can see which tabs you have worked in. It keeps that number for as long as it stays open. Reading a page does not claim one.
 
 If \`browser_status\` reports \`degraded: true\`, the bridge is on its fallback path and is missing capabilities — read its \`warning\`, and report that to the user rather than diagnosing individual tool failures as bugs.
+
+Each VS Code window runs its own bridge. This server targets the one whose workspace contains your working directory; when none does, it falls back to the most recently started window — so with several windows open, a tab can open in a window the user is not looking at. Results from \`browser_navigate\` and \`browser_tab_open\` carry a \`Bridge note:\` line when that happens, and \`browser_status\` \`bridge\` always names the window being driven. Pass that on instead of letting the user hunt for a tab that is not in their window.
 
 By default you can only see and drive tabs this bridge opened — tabs the user opened themselves are detached and never appear in \`browser_tab_list\`. That is deliberate, not a fault: opening a page in the integrated browser does not hand it to an agent. If the user asks you to look at a page they already have open, you have two honest answers: open it yourself with \`browser_tab_open\` / \`browser_navigate\` (same browser, same cookies and localhost routing, but a fresh load — so form input, scroll position and post-login state are not carried over), or tell them to enable \`integratedBrowserMcp.allowAllExistingTabs\`, after which their tabs become drivable. \`browser_status\` \`tabAccess\` reports which mode is active.
 
@@ -233,7 +187,7 @@ server.tool(
 		url: z.string().describe('The URL to navigate to'),
 		tabId: z.string().optional().describe(tabIdDescription),
 	},
-	async ({ url, tabId }) => toMcpResult(await bridgePost('/navigate', { url, tabId })),
+	async ({ url, tabId }) => withBridgeNote(toMcpResult(await bridgePost('/navigate', { url, tabId }))),
 );
 
 // Eval
@@ -562,9 +516,31 @@ server.tool(
 // Status
 server.tool(
 	'browser_status',
-	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode there is a single tab and browser_tab_open is unavailable. Also returns `tabAccess`, which says whether you may drive tabs the user opened (`allowAllExistingTabs`, off by default) — check it before telling a user why their page is not in browser_tab_list. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
+	'Check the bridge connection status and — importantly — what this build can actually do. Returns `degraded: true` plus a `warning` naming the cause and remedy when the `browser` API proposal is not granted; in that mode there is a single tab and browser_tab_open is unavailable. Also returns `tabAccess`, which says whether you may drive tabs the user opened (`allowAllExistingTabs`, off by default) — check it before telling a user why their page is not in browser_tab_list, and `bridge`, which names the VS Code window you are actually driving (`workspace`, `matchedBy`, `cwd`, `windowsRunningBridge`) plus a `warning` when that window was picked by fallback rather than matched to your working directory. Worth calling first when anything behaves unexpectedly, rather than inferring capability from failures.',
 	{},
-	async () => toMcpResult(await bridgeFetch('/status')),
+	async () => {
+		const result = await bridgeFetch('/status');
+		if (!result.ok) return toMcpResult(result);
+		const r = lastResolution;
+		const data = result.data && typeof result.data === 'object' && !Array.isArray(result.data)
+			? result.data as Record<string, unknown>
+			: null;
+		if (!data || !r) return toMcpResult(result);
+		const note = foreignWindowNote(r);
+		// Which window answered, and how it was chosen. Without this, an agent
+		// whose call went to another VS Code window has no way to find out —
+		// every other field describes that window's browser and reads as fine.
+		data.bridge = {
+			workspace: (typeof data.workspace === 'string' ? data.workspace : null) ?? r.instance?.workspace ?? null,
+			pid: r.instance?.pid ?? null,
+			endpoint: describeEndpoint(r.used ?? r.endpoints[0]),
+			matchedBy: r.match,
+			cwd: r.cwd,
+			windowsRunningBridge: r.liveCount,
+			...(note ? { warning: note } : {}),
+		};
+		return withBridgeNote(toMcpResult({ ...result, data }));
+	},
 );
 
 // Tab management — requires proposed browser API on the extension side.
@@ -579,7 +555,7 @@ server.tool(
 		makeActive: z.boolean().optional().default(true).describe('Make this tab the active (default) target for subsequent tool calls'),
 		beside: z.boolean().optional().describe('Open in an editor group beside the current one instead of the current group. Useful when working alongside the user, but it does split their layout — leave off unless asked.'),
 	},
-	async ({ url, makeActive, beside }) => toMcpResult(await bridgePost('/tab/open', { url, makeActive, beside })),
+	async ({ url, makeActive, beside }) => withBridgeNote(toMcpResult(await bridgePost('/tab/open', { url, makeActive, beside }))),
 );
 
 server.tool(

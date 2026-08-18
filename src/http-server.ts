@@ -147,10 +147,13 @@ export class BridgeServer {
 	private emulatePath: 'emulation' | 'page' | 'unknown' = 'unknown';
 	/** Set when listening on a unix socket / named pipe instead of a TCP port. */
 	private socketPath: string | null = null;
+	/** First workspace folder of the window this bridge belongs to. */
+	private workspace: string;
 
-	constructor(cdp: CDPManager, log: vscode.OutputChannel) {
+	constructor(cdp: CDPManager, log: vscode.OutputChannel, workspace = '') {
 		this.cdp = cdp;
 		this.log = log;
+		this.workspace = workspace;
 		this.app = express();
 		this.app.use(express.json());
 		this.setupRoutes();
@@ -370,6 +373,10 @@ export class BridgeServer {
 					// model and cannot be revoked by it: `BrowserTab` exposes no
 					// sharing state, so share/unshare is invisible here.
 					tabAccess: this.tabAccessStatus(),
+					// Which window answered. Several can run a bridge at once and
+					// a caller picks one by working directory, so "who am I
+					// driving" is not self-evident from anything else here.
+					workspace: this.workspace || null,
 					transport: this.cdp.transport,
 					// The listening endpoint, so a user/agent can see whether the
 					// bridge is on a socket or fell back to a TCP port (the `auto`
