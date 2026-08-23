@@ -5,7 +5,7 @@ All notable changes to the Integrated Browser MCP extension are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.7.0] — 2026-08-23
 
 Most of this release was contributed by [@RyanEwen](https://github.com/RyanEwen) (#6, #8) — sharing enforcement, the socket transport, and a series of fixes from live testing. Thanks!
 
