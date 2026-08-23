@@ -22,3 +22,5 @@ media/*.svg
 *.vsix
 tmp/**
 tests/**
+RELEASING.md
+scripts/**
